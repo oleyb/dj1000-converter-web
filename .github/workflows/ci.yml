@@ -1,0 +1,64 @@
+name: Web App CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out app repo
+        uses: actions/checkout@v4
+
+      - name: Check out dj1000 converter library
+        uses: actions/checkout@v4
+        with:
+          repository: oleyb/dj1000-converter-lib
+          path: vendor-lib
+
+      - name: Check out emsdk
+        uses: actions/checkout@v4
+        with:
+          repository: emscripten-core/emsdk
+          path: emsdk
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install and activate emsdk
+        working-directory: emsdk
+        run: |
+          ./emsdk install latest
+          ./emsdk activate latest
+
+      - name: Install app dependencies
+        run: npm ci
+
+      - name: Build dj1000 WASM vendor bundle
+        run: |
+          source "$GITHUB_WORKSPACE/emsdk/emsdk_env.sh"
+          emcmake cmake -S "$GITHUB_WORKSPACE/vendor-lib" -B "$GITHUB_WORKSPACE/vendor-lib/build-wasm" -G Ninja \
+            -DDJ1000_BUILD_WASM=ON \
+            -DDJ1000_BUILD_CLI=OFF \
+            -DDJ1000_BUILD_TESTS=OFF
+          cmake --build "$GITHUB_WORKSPACE/vendor-lib/build-wasm" --target dj1000_wasm
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build static app
+        env:
+          DJ1000_LIB_DIR: ./vendor-lib
+        run: npm run build:pages
