@@ -5,6 +5,9 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 permissions:
   contents: read
   pages: write
@@ -20,16 +23,16 @@ jobs:
 
     steps:
       - name: Check out app repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Check out dj1000 converter library
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: oleyb/dj1000-converter-lib
           path: vendor-lib
 
       - name: Check out emsdk
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: emscripten-core/emsdk
           path: emsdk
@@ -71,7 +74,7 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: dist
 
