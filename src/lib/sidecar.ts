@@ -1,12 +1,17 @@
 import {
   defaultEdits,
   defaultMetadata,
+  type LegacyPipelineEdits,
   type PhotoEdits,
   type PhotoMetadata,
   type PhotoRotation,
   type PhotoReviewStatus,
+  type PhotoPipelineEntry,
   type PhotoSidecar,
+  type ViewEdits,
 } from "../types/models";
+
+const LEGACY_PIPELINE_ID = "legacy";
 
 function clamp(number: number, minimum: number, maximum: number) {
   return Math.min(maximum, Math.max(minimum, number));
@@ -37,6 +42,61 @@ export function normalizeEdits(candidate: Partial<PhotoEdits> | undefined): Phot
   };
 }
 
+function splitEdits(edits: PhotoEdits): {
+  converter: LegacyPipelineEdits;
+  presentation: ViewEdits;
+} {
+  return {
+    converter: {
+      size: edits.size,
+      redBalance: edits.redBalance,
+      greenBalance: edits.greenBalance,
+      blueBalance: edits.blueBalance,
+      contrast: edits.contrast,
+      brightness: edits.brightness,
+      vividness: edits.vividness,
+      sharpness: edits.sharpness,
+    },
+    presentation: {
+      rotation: edits.rotation,
+      flipHorizontal: edits.flipHorizontal,
+      flipVertical: edits.flipVertical,
+    },
+  };
+}
+
+function normalizePipelineSettings(candidate: unknown): Partial<PhotoEdits> {
+  if (!candidate || typeof candidate !== "object") {
+    return {};
+  }
+
+  return candidate as Partial<PhotoEdits>;
+}
+
+function normalizePipelineMap(candidate: unknown): Record<string, PhotoPipelineEntry> {
+  if (!candidate || typeof candidate !== "object") {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(candidate).flatMap(([id, value]) => {
+      if (!value || typeof value !== "object") {
+        return [];
+      }
+
+      const entry = value as Partial<PhotoPipelineEntry>;
+      const settings =
+        entry.settings && typeof entry.settings === "object"
+          ? (entry.settings as Record<string, unknown>)
+          : {};
+      const version = typeof entry.version === "number" && Number.isFinite(entry.version)
+        ? entry.version
+        : 1;
+      return [[id, { version, settings } satisfies PhotoPipelineEntry]];
+    }),
+  );
+}
+
 export function normalizeMetadata(candidate: Partial<PhotoMetadata> | undefined): PhotoMetadata {
   const defaults = defaultMetadata();
   const reviewStatus: PhotoReviewStatus =
@@ -54,11 +114,13 @@ export function normalizeMetadata(candidate: Partial<PhotoMetadata> | undefined)
 export function parseSidecarText(sidecarText?: string | null): {
   edits: PhotoEdits;
   metadata: PhotoMetadata;
+  sidecar: PhotoSidecar | null;
 } {
   if (!sidecarText) {
     return {
       edits: defaultEdits(),
       metadata: defaultMetadata(),
+      sidecar: null,
     };
   }
 
@@ -66,30 +128,93 @@ export function parseSidecarText(sidecarText?: string | null): {
     const parsed = JSON.parse(sidecarText) as Partial<PhotoSidecar> & {
       settings?: Partial<PhotoEdits>;
       edits?: Partial<PhotoEdits>;
+      converter?: Partial<LegacyPipelineEdits>;
+      presentation?: Partial<ViewEdits>;
+      activePipeline?: string;
+      pipelines?: Record<string, Partial<PhotoPipelineEntry>>;
       metadata?: Partial<PhotoMetadata>;
     };
 
-    return {
-      edits: normalizeEdits(parsed.edits ?? parsed.settings),
+    const normalizedPipelines = normalizePipelineMap(parsed.pipelines);
+    const fallbackLegacySettings = {
+      ...(parsed.settings ?? parsed.edits ?? {}),
+      ...(parsed.converter ?? {}),
+    } satisfies Partial<PhotoEdits>;
+    const activePipeline =
+      typeof parsed.activePipeline === "string" && parsed.activePipeline.trim().length > 0
+        ? parsed.activePipeline
+        : LEGACY_PIPELINE_ID;
+    const legacyEntry = normalizedPipelines[LEGACY_PIPELINE_ID];
+    const activeEntry = normalizedPipelines[activePipeline];
+    const activePipelineSettings = normalizePipelineSettings(activeEntry?.settings);
+    const legacyPipelineSettings = normalizePipelineSettings(legacyEntry?.settings);
+    const mergedEdits = {
+      ...fallbackLegacySettings,
+      ...(activePipeline === LEGACY_PIPELINE_ID ? activePipelineSettings : legacyPipelineSettings),
+      ...(parsed.presentation ?? {}),
+    } satisfies Partial<PhotoEdits>;
+    const normalizedEdits = normalizeEdits(mergedEdits);
+    const split = splitEdits(normalizedEdits);
+    const pipelines = {
+      ...normalizedPipelines,
+      [LEGACY_PIPELINE_ID]: {
+        version: legacyEntry?.version ?? 1,
+        settings: {
+          ...(legacyEntry?.settings ?? {}),
+          ...split.converter,
+        },
+      },
+    } satisfies Record<string, PhotoPipelineEntry>;
+    const sidecar: PhotoSidecar = {
+      schema: "dj1000-photo-settings/v3",
+      activePipeline,
+      pipelines,
+      presentation: split.presentation,
       metadata: normalizeMetadata(parsed.metadata),
+      updatedAt:
+        typeof parsed.updatedAt === "string" && parsed.updatedAt.length > 0
+          ? parsed.updatedAt
+          : new Date().toISOString(),
+    };
+
+    return {
+      edits: normalizedEdits,
+      metadata: sidecar.metadata,
+      sidecar,
     };
   } catch {
     return {
       edits: defaultEdits(),
       metadata: defaultMetadata(),
+      sidecar: null,
     };
   }
 }
 
-export function createSidecar(edits: PhotoEdits, metadata: PhotoMetadata): PhotoSidecar {
+export function createSidecar(
+  edits: PhotoEdits,
+  metadata: PhotoMetadata,
+  existingSidecar?: PhotoSidecar | null,
+): PhotoSidecar {
+  const normalizedEdits = normalizeEdits(edits);
+  const split = splitEdits(normalizedEdits);
+  const normalizedPipelines = normalizePipelineMap(existingSidecar?.pipelines);
   return {
-    schema: "dj1000-photo-settings/v1",
-    edits: normalizeEdits(edits),
+    schema: "dj1000-photo-settings/v3",
+    activePipeline: LEGACY_PIPELINE_ID,
+    pipelines: {
+      ...normalizedPipelines,
+      [LEGACY_PIPELINE_ID]: {
+        version: normalizedPipelines[LEGACY_PIPELINE_ID]?.version ?? 1,
+        settings: { ...split.converter },
+      },
+    },
+    presentation: split.presentation,
     metadata: normalizeMetadata(metadata),
     updatedAt: new Date().toISOString(),
   };
 }
 
-export function stringifySidecar(edits: PhotoEdits, metadata: PhotoMetadata) {
-  return JSON.stringify(createSidecar(edits, metadata), null, 2);
+export function stringifySidecar(edits: PhotoEdits, metadata: PhotoMetadata, existingSidecar?: PhotoSidecar | null) {
+  return JSON.stringify(createSidecar(edits, metadata, existingSidecar), null, 2);
 }

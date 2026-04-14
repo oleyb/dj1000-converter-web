@@ -631,14 +631,18 @@ function ExportDialog({
             </select>
           </div>
 
-          <label className="field-row">
+          <div className="field-row">
             <input
+              id="include-source-bundle"
               type="checkbox"
               checked={state.includeSourceBundle}
               onChange={(event) => onChange({ ...state, includeSourceBundle: event.target.checked })}
             />
-            <span>Also include the original DAT file with the settings file</span>
-          </label>
+            <label htmlFor="include-source-bundle">
+              Turn this on if you want to reopen the exported folder later and keep working with the saved adjustments.
+              (Includes original *.DAT files as well as *.DAT.json edit settings files)
+            </label>
+          </div>
 
           {!desktopAvailable ? (
             <p className="field-help">
@@ -1279,7 +1283,7 @@ export default function App() {
     const timer = window.setTimeout(() => {
       void desktopBridge.persistSidecar({
         filePath: photo.filePath!,
-        sidecarText: stringifySidecar(photo.edits, photo.metadata),
+        sidecarText: stringifySidecar(photo.edits, photo.metadata, photo.sidecar),
       });
     }, 240);
     saveTimersRef.current.set(photo.id, timer);

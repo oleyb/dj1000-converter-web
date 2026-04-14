@@ -8,7 +8,7 @@ export type RenderSize = "small" | "normal" | "large";
 export type PhotoReviewStatus = "none" | "flagged" | "rejected";
 export type PhotoRotation = 0 | 90 | 180 | 270;
 
-export interface PhotoEdits {
+export interface LegacyPipelineEdits {
   size: RenderSize;
   redBalance: number;
   greenBalance: number;
@@ -17,9 +17,26 @@ export interface PhotoEdits {
   brightness: number;
   vividness: number;
   sharpness: number;
+}
+
+export interface ViewEdits {
   rotation: PhotoRotation;
   flipHorizontal: boolean;
   flipVertical: boolean;
+}
+
+export interface PhotoEdits {
+  size: LegacyPipelineEdits["size"];
+  redBalance: LegacyPipelineEdits["redBalance"];
+  greenBalance: LegacyPipelineEdits["greenBalance"];
+  blueBalance: LegacyPipelineEdits["blueBalance"];
+  contrast: LegacyPipelineEdits["contrast"];
+  brightness: LegacyPipelineEdits["brightness"];
+  vividness: LegacyPipelineEdits["vividness"];
+  sharpness: LegacyPipelineEdits["sharpness"];
+  rotation: ViewEdits["rotation"];
+  flipHorizontal: ViewEdits["flipHorizontal"];
+  flipVertical: ViewEdits["flipVertical"];
 }
 
 export interface PhotoMetadata {
@@ -28,9 +45,16 @@ export interface PhotoMetadata {
   removed: boolean;
 }
 
+export interface PhotoPipelineEntry {
+  version: number;
+  settings: Record<string, unknown>;
+}
+
 export interface PhotoSidecar {
-  schema: "dj1000-photo-settings/v1";
-  edits: PhotoEdits;
+  schema: "dj1000-photo-settings/v3";
+  activePipeline: string;
+  pipelines: Record<string, PhotoPipelineEntry>;
+  presentation: ViewEdits;
   metadata: PhotoMetadata;
   updatedAt: string;
 }
@@ -51,6 +75,7 @@ export interface PhotoRecord {
   datBytes: Uint8Array;
   edits: PhotoEdits;
   metadata: PhotoMetadata;
+  sidecar: PhotoSidecar | null;
   thumbnail?: RenderedFrame;
   thumbnailUrl?: string;
   preview?: RenderedFrame;

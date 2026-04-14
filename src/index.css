@@ -148,7 +148,7 @@ canvas {
 
 .library-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
   gap: 10px;
   align-content: start;
 }
@@ -163,9 +163,12 @@ canvas {
 
 .thumbnail-card {
   display: grid;
+  width: 100%;
+  min-width: 0;
   gap: 6px;
-  padding: 8px;
+  padding: 10px;
   cursor: pointer;
+  overflow: hidden;
 }
 
 .thumbnail-card.is-selected {
@@ -184,6 +187,8 @@ canvas {
 
 .thumbnail-figure {
   display: grid;
+  width: 100%;
+  min-width: 0;
   place-items: center;
   aspect-ratio: 4 / 3;
   overflow: hidden;
@@ -203,17 +208,20 @@ canvas {
 
 .thumbnail-meta {
   display: grid;
+  min-width: 0;
   gap: 2px;
 }
 
 .thumbnail-name {
   font-weight: bold;
+  min-width: 0;
   word-break: break-word;
 }
 
 .thumbnail-path {
   color: #444;
   font-size: 12px;
+  min-width: 0;
   word-break: break-word;
 }
 

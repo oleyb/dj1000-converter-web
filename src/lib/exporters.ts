@@ -107,12 +107,11 @@ export async function buildBrowserExportBundle(
   const rendered = await renderFrameToDownloadFile(frame, photo.edits, format, stem);
   const files: BrowserExportFile[] = [{ name: rendered.filename, blob: rendered.blob }];
 
-  files.push({
-    name: `${basePath}.json`,
-    blob: new Blob([stringifySidecar(photo.edits, photo.metadata)], { type: "application/json" }),
-  });
-
   if (includeSourceBundle) {
+    files.push({
+      name: `${basePath}.json`,
+      blob: new Blob([stringifySidecar(photo.edits, photo.metadata, photo.sidecar)], { type: "application/json" }),
+    });
     files.push({
       name: basePath,
       blob: new Blob([sliceTypedArrayBuffer(photo.datBytes)], { type: "application/octet-stream" }),
@@ -136,13 +135,13 @@ export async function buildDesktopExportPayload(
       relativePath: rendered.filename,
       bytes: renderedBytes,
     },
-    {
-      relativePath: `${photo.name}.json`,
-      bytes: new TextEncoder().encode(stringifySidecar(photo.edits, photo.metadata)).buffer,
-    },
   ];
 
   if (includeSourceBundle) {
+    files.push({
+      relativePath: `${photo.name}.json`,
+      bytes: new TextEncoder().encode(stringifySidecar(photo.edits, photo.metadata, photo.sidecar)).buffer,
+    });
     files.push({
       relativePath: photo.name,
       bytes: sliceTypedArrayBuffer(photo.datBytes),
