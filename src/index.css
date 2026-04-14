@@ -52,9 +52,30 @@ canvas {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+  position: relative;
   padding: 8px 12px;
-  border-bottom: 1px solid #808080;
-  background: linear-gradient(180deg, #d9d9d9 0%, #c0c0c0 100%);
+  border-bottom: 0;
+  background: #c0c0c0 !important;
+  background-image: none !important;
+  box-shadow: none;
+}
+
+.shell-toolbar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background:
+    linear-gradient(
+      to bottom,
+      #808080 0,
+      #808080 1px,
+      #000000 1px,
+      #000000 2px
+    );
+  pointer-events: none;
 }
 
 .menu-strip {
