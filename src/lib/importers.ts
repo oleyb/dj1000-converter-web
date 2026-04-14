@@ -43,7 +43,7 @@ export async function parseBrowserImport(files: FileList | File[], ingestMode: P
 }
 
 export function createPhotoRecord(payload: ImportedPhotoPayload): PhotoRecord {
-  const edits = parseSidecarText(payload.sidecarText);
+  const { edits, metadata } = parseSidecarText(payload.sidecarText);
   return {
     id: crypto.randomUUID(),
     name: payload.name,
@@ -53,6 +53,7 @@ export function createPhotoRecord(payload: ImportedPhotoPayload): PhotoRecord {
     ingestMode: payload.ingestMode,
     datBytes: payload.bytes,
     edits,
+    metadata,
     previewStatus: "idle",
     thumbnailStatus: "idle",
   };

@@ -5,6 +5,8 @@ export type ExportScope = "current" | "selected" | "all";
 export type ExportFormat = "png" | "jpeg";
 export type RenderIntent = "thumbnail" | "preview" | "export";
 export type RenderSize = "small" | "normal" | "large";
+export type PhotoReviewStatus = "none" | "flagged" | "rejected";
+export type PhotoRotation = 0 | 90 | 180 | 270;
 
 export interface PhotoEdits {
   size: RenderSize;
@@ -15,11 +17,21 @@ export interface PhotoEdits {
   brightness: number;
   vividness: number;
   sharpness: number;
+  rotation: PhotoRotation;
+  flipHorizontal: boolean;
+  flipVertical: boolean;
+}
+
+export interface PhotoMetadata {
+  rating: number;
+  reviewStatus: PhotoReviewStatus;
+  removed: boolean;
 }
 
 export interface PhotoSidecar {
   schema: "dj1000-photo-settings/v1";
   edits: PhotoEdits;
+  metadata: PhotoMetadata;
   updatedAt: string;
 }
 
@@ -38,6 +50,7 @@ export interface PhotoRecord {
   ingestMode: IngestMode;
   datBytes: Uint8Array;
   edits: PhotoEdits;
+  metadata: PhotoMetadata;
   thumbnail?: RenderedFrame;
   thumbnailUrl?: string;
   preview?: RenderedFrame;
@@ -88,4 +101,13 @@ export const defaultEdits = (): PhotoEdits => ({
   brightness: 0,
   vividness: 0,
   sharpness: 0,
+  rotation: 0,
+  flipHorizontal: false,
+  flipVertical: false,
+});
+
+export const defaultMetadata = (): PhotoMetadata => ({
+  rating: 0,
+  reviewStatus: "none",
+  removed: false,
 });

@@ -1,9 +1,11 @@
 import JSZip from "jszip";
 
+import { createTransformedFrameCanvas } from "./frameTransforms";
 import { stringifySidecar } from "./sidecar";
 import type {
   ExportFilePayload,
   ExportFormat,
+  PhotoEdits,
   PhotoRecord,
   RenderedFrame,
 } from "../types/models";
@@ -21,21 +23,8 @@ function normalizeArchivePath(input: string) {
   return input.replaceAll("\\", "/").replace(/^\/+/, "");
 }
 
-function renderFrameToCanvas(frame: RenderedFrame) {
-  const canvas = document.createElement("canvas");
-  canvas.width = frame.width;
-  canvas.height = frame.height;
-  const context = canvas.getContext("2d");
-  if (!context) {
-    throw new Error("Unable to create a canvas rendering context.");
-  }
-  const imageData = new ImageData(new Uint8ClampedArray(frame.pixels), frame.width, frame.height);
-  context.putImageData(imageData, 0, 0);
-  return canvas;
-}
-
-export async function renderFrameToBlob(frame: RenderedFrame, format: ExportFormat) {
-  const canvas = renderFrameToCanvas(frame);
+export async function renderFrameToBlob(frame: RenderedFrame, edits: PhotoEdits, format: ExportFormat) {
+  const canvas = createTransformedFrameCanvas(frame, edits);
   const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
   const quality = format === "jpeg" ? 0.95 : undefined;
   const blob = await new Promise<Blob>((resolve, reject) => {
@@ -52,11 +41,12 @@ export async function renderFrameToBlob(frame: RenderedFrame, format: ExportForm
 
 export async function renderFrameToDownloadFile(
   frame: RenderedFrame,
+  edits: PhotoEdits,
   format: ExportFormat,
   baseName: string,
 ) {
   const extension = format === "jpeg" ? "jpg" : "png";
-  const blob = await renderFrameToBlob(frame, format);
+  const blob = await renderFrameToBlob(frame, edits, format);
   return {
     filename: `${baseName}.${extension}`,
     blob,
@@ -86,6 +76,26 @@ export async function buildBrowserExportArchive(files: BrowserExportFile[]) {
   });
 }
 
+export async function buildBrowserExportArchiveWithProgress(
+  files: BrowserExportFile[],
+  onProgress?: (percent: number, currentFile: string | null) => void,
+) {
+  const archive = new JSZip();
+  for (const file of files) {
+    archive.file(normalizeArchivePath(file.name), file.blob);
+  }
+  return archive.generateAsync(
+    {
+      type: "blob",
+      compression: "DEFLATE",
+      compressionOptions: { level: 6 },
+    },
+    (metadata) => {
+      onProgress?.(metadata.percent, metadata.currentFile ?? null);
+    },
+  );
+}
+
 export async function buildBrowserExportBundle(
   photo: PhotoRecord,
   frame: RenderedFrame,
@@ -94,12 +104,12 @@ export async function buildBrowserExportBundle(
 ) {
   const basePath = normalizeArchivePath(photo.relativePath || photo.name);
   const stem = basePath.replace(/\.dat$/i, "");
-  const rendered = await renderFrameToDownloadFile(frame, format, stem);
+  const rendered = await renderFrameToDownloadFile(frame, photo.edits, format, stem);
   const files: BrowserExportFile[] = [{ name: rendered.filename, blob: rendered.blob }];
 
   files.push({
     name: `${basePath}.json`,
-    blob: new Blob([stringifySidecar(photo.edits)], { type: "application/json" }),
+    blob: new Blob([stringifySidecar(photo.edits, photo.metadata)], { type: "application/json" }),
   });
 
   if (includeSourceBundle) {
@@ -119,7 +129,7 @@ export async function buildDesktopExportPayload(
   includeSourceBundle: boolean,
 ) {
   const stem = photo.relativePath.replace(/\.dat$/i, "");
-  const rendered = await renderFrameToDownloadFile(frame, format, stem);
+  const rendered = await renderFrameToDownloadFile(frame, photo.edits, format, stem);
   const renderedBytes = await rendered.blob.arrayBuffer();
   const files: ExportFilePayload[] = [
     {
@@ -128,7 +138,7 @@ export async function buildDesktopExportPayload(
     },
     {
       relativePath: `${photo.name}.json`,
-      bytes: new TextEncoder().encode(stringifySidecar(photo.edits)).buffer,
+      bytes: new TextEncoder().encode(stringifySidecar(photo.edits, photo.metadata)).buffer,
     },
   ];
 
