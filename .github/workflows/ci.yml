@@ -38,6 +38,12 @@ jobs:
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y ninja-build
 
+      - name: Download Adobe DNG SDK
+        run: |
+          curl -L https://www.adobe.com/go/dng_sdk -o "$RUNNER_TEMP/dng_sdk.zip"
+          unzip -q "$RUNNER_TEMP/dng_sdk.zip" -d "$GITHUB_WORKSPACE"
+          test -f "$GITHUB_WORKSPACE/dng_sdk_1_7_1/dng_sdk/source/dng_negative.h"
+
       - name: Install and activate emsdk
         working-directory: emsdk
         run: |
@@ -53,8 +59,27 @@ jobs:
           emcmake cmake -S "$GITHUB_WORKSPACE/vendor-lib" -B "$GITHUB_WORKSPACE/vendor-lib/build-wasm" -G Ninja \
             -DDJ1000_BUILD_WASM=ON \
             -DDJ1000_BUILD_CLI=OFF \
-            -DDJ1000_BUILD_TESTS=OFF
+            -DDJ1000_BUILD_TESTS=OFF \
+            -DDJ1000_ENABLE_ADOBE_DNG_SDK=ON \
+            -DDJ1000_ADOBE_DNG_SDK_ROOT="$GITHUB_WORKSPACE/dng_sdk_1_7_1"
           cmake --build "$GITHUB_WORKSPACE/vendor-lib/build-wasm" --target dj1000_wasm
+
+      - name: Verify WASM RAW DNG support
+        run: |
+          node --input-type=module <<'EOF'
+          import { pathToFileURL } from "node:url";
+          const helperPath = `${process.env.GITHUB_WORKSPACE}/vendor-lib/build-wasm/native/dj1000_wasm_api.mjs`;
+          const modulePath = `${process.env.GITHUB_WORKSPACE}/vendor-lib/build-wasm/native/dj1000_wasm.mjs`;
+          const { createDj1000WasmConverter } = await import(pathToFileURL(helperPath).href);
+          const converter = await createDj1000WasmConverter({
+            locateFile(file) {
+              return new URL(file, pathToFileURL(modulePath)).href;
+            },
+          });
+          if (!converter.supportsDng) {
+            throw new Error("Adobe-backed RAW DNG support is missing from the CI WASM bundle");
+          }
+          EOF
 
       - name: Lint
         run: npm run lint
