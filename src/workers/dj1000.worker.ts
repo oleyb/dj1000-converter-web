@@ -8,6 +8,8 @@ type SessionHandle = {
 };
 
 interface WorkerConverter {
+  supportsDng: boolean;
+  convertDatToDng(input: Uint8Array): Uint8Array;
   openSession(input: Uint8Array): SessionHandle;
 }
 
@@ -23,8 +25,10 @@ type WorkerRenderOptions = {
 };
 
 type WorkerRequest =
+  | { type: "get-capabilities"; requestId: number }
   | { type: "open-document"; photoId: string; bytes: ArrayBuffer }
   | { type: "close-document"; photoId: string }
+  | { type: "convert-dng"; requestId: number; bytes: ArrayBuffer }
   | {
       type: "render";
       photoId: string;
@@ -135,6 +139,24 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
   const message = event.data;
 
   switch (message.type) {
+    case "get-capabilities": {
+      try {
+        const converter = await loadConverter();
+        scope.postMessage({
+          type: "capabilities",
+          requestId: message.requestId,
+          supportsDng: Boolean(converter.supportsDng),
+        });
+      } catch (error) {
+        scope.postMessage({
+          type: "capabilities",
+          requestId: message.requestId,
+          supportsDng: false,
+          error: String(error instanceof Error ? error.message : error),
+        });
+      }
+      return;
+    }
     case "open-document": {
       try {
         const converter = await loadConverter();
@@ -166,6 +188,27 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
         order: ++jobSequence,
       });
       void processQueue();
+      return;
+    }
+    case "convert-dng": {
+      try {
+        const converter = await loadConverter();
+        const dngBytes = converter.convertDatToDng(new Uint8Array(message.bytes));
+        scope.postMessage(
+          {
+            type: "convert-dng-complete",
+            requestId: message.requestId,
+            bytes: dngBytes.buffer,
+          },
+          [dngBytes.buffer],
+        );
+      } catch (error) {
+        scope.postMessage({
+          type: "convert-dng-error",
+          requestId: message.requestId,
+          error: String(error instanceof Error ? error.message : error),
+        });
+      }
       return;
     }
     case "dispose": {

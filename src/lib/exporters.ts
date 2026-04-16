@@ -24,6 +24,9 @@ function normalizeArchivePath(input: string) {
 }
 
 export async function renderFrameToBlob(frame: RenderedFrame, edits: PhotoEdits, format: ExportFormat) {
+  if (format === "dng") {
+    throw new Error("DNG export does not use the rendered frame encoder.");
+  }
   const canvas = createTransformedFrameCanvas(frame, edits);
   const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
   const quality = format === "jpeg" ? 0.95 : undefined;
@@ -51,6 +54,61 @@ export async function renderFrameToDownloadFile(
     filename: `${baseName}.${extension}`,
     blob,
   };
+}
+
+export function buildBrowserDngExportBundle(
+  photo: PhotoRecord,
+  dngBytes: Uint8Array,
+  includeSourceBundle: boolean,
+) {
+  const basePath = normalizeArchivePath(photo.relativePath || photo.name);
+  const stem = basePath.replace(/\.dat$/i, "");
+  const files: BrowserExportFile[] = [
+    {
+      name: `${stem}.dng`,
+      blob: new Blob([sliceTypedArrayBuffer(dngBytes)], { type: "image/x-adobe-dng" }),
+    },
+  ];
+
+  if (includeSourceBundle) {
+    files.push({
+      name: `${basePath}.json`,
+      blob: new Blob([stringifySidecar(photo.edits, photo.metadata, photo.sidecar)], { type: "application/json" }),
+    });
+    files.push({
+      name: basePath,
+      blob: new Blob([sliceTypedArrayBuffer(photo.datBytes)], { type: "application/octet-stream" }),
+    });
+  }
+
+  return files;
+}
+
+export function buildDesktopDngExportPayload(
+  photo: PhotoRecord,
+  dngBytes: Uint8Array,
+  includeSourceBundle: boolean,
+) {
+  const stem = photo.relativePath.replace(/\.dat$/i, "");
+  const files: ExportFilePayload[] = [
+    {
+      relativePath: `${stem}.dng`,
+      bytes: sliceTypedArrayBuffer(dngBytes),
+    },
+  ];
+
+  if (includeSourceBundle) {
+    files.push({
+      relativePath: `${photo.name}.json`,
+      bytes: new TextEncoder().encode(stringifySidecar(photo.edits, photo.metadata, photo.sidecar)).buffer,
+    });
+    files.push({
+      relativePath: photo.name,
+      bytes: sliceTypedArrayBuffer(photo.datBytes),
+    });
+  }
+
+  return files;
 }
 
 export function triggerBrowserDownload(blob: Blob, fileName: string) {

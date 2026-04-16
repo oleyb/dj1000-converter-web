@@ -12,8 +12,10 @@ interface WorkerRenderOptions {
 }
 
 type WorkerRequest =
+  | { type: "get-capabilities"; requestId: number }
   | { type: "open-document"; photoId: string; bytes: ArrayBuffer }
   | { type: "close-document"; photoId: string }
+  | { type: "convert-dng"; requestId: number; bytes: ArrayBuffer }
   | {
       type: "render";
       photoId: string;
@@ -24,8 +26,11 @@ type WorkerRequest =
   | { type: "dispose" };
 
 type WorkerResponse =
+  | { type: "capabilities"; requestId: number; supportsDng: boolean; error?: string }
   | { type: "document-opened"; photoId: string }
   | { type: "document-open-error"; photoId: string; error: string }
+  | { type: "convert-dng-complete"; requestId: number; bytes: ArrayBuffer }
+  | { type: "convert-dng-error"; requestId: number; error: string }
   | {
       type: "render-complete";
       photoId: string;
@@ -51,6 +56,16 @@ interface PendingRender {
   reject: (error: Error) => void;
 }
 
+interface PendingDng {
+  resolve: (bytes: Uint8Array) => void;
+  reject: (error: Error) => void;
+}
+
+interface PendingCapabilities {
+  resolve: (capabilities: { supportsDng: boolean }) => void;
+  reject: (error: Error) => void;
+}
+
 function toWorkerOptions(edits: PhotoEdits): WorkerRenderOptions {
   return {
     size: edits.size,
@@ -69,7 +84,10 @@ export class Dj1000RenderPool {
   private readonly photoToWorker = new Map<string, WorkerSlot>();
   private readonly pendingOpens = new Map<string, PendingOpen>();
   private readonly pendingRenders = new Map<number, PendingRender>();
+  private readonly pendingDngConversions = new Map<number, PendingDng>();
+  private readonly pendingCapabilities = new Map<number, PendingCapabilities>();
   private nextRenderRequestId = 1;
+  private capabilitiesPromise: Promise<{ supportsDng: boolean }> | null = null;
 
   constructor(workerCount = Math.min(4, Math.max(2, Math.floor((navigator.hardwareConcurrency || 4) / 2)))) {
     this.workers = Array.from({ length: workerCount }, () => {
@@ -117,6 +135,44 @@ export class Dj1000RenderPool {
     });
   }
 
+  getCapabilities() {
+    if (this.capabilitiesPromise) {
+      return this.capabilitiesPromise;
+    }
+
+    const requestId = this.nextRenderRequestId++;
+    const slot = this.workers[0];
+    this.capabilitiesPromise = new Promise<{ supportsDng: boolean }>((resolve, reject) => {
+      this.pendingCapabilities.set(requestId, { resolve, reject });
+      const message: WorkerRequest = {
+        type: "get-capabilities",
+        requestId,
+      };
+      slot.worker.postMessage(message);
+    }).catch((error) => {
+      this.capabilitiesPromise = null;
+      throw error;
+    });
+
+    return this.capabilitiesPromise;
+  }
+
+  convertDatToDng(bytes: Uint8Array, preferredPhotoId?: string) {
+    const slot = preferredPhotoId ? this.photoToWorker.get(preferredPhotoId) ?? this.pickWorkerSlot() : this.pickWorkerSlot();
+    const requestId = this.nextRenderRequestId++;
+    const payload = bytes.slice().buffer;
+
+    return new Promise<Uint8Array>((resolve, reject) => {
+      this.pendingDngConversions.set(requestId, { resolve, reject });
+      const message: WorkerRequest = {
+        type: "convert-dng",
+        requestId,
+        bytes: payload,
+      };
+      slot.worker.postMessage(message, [payload]);
+    });
+  }
+
   closeDocument(photoId: string) {
     const slot = this.photoToWorker.get(photoId);
     if (!slot) {
@@ -135,7 +191,10 @@ export class Dj1000RenderPool {
     }
     this.pendingOpens.clear();
     this.pendingRenders.clear();
+    this.pendingDngConversions.clear();
+    this.pendingCapabilities.clear();
     this.photoToWorker.clear();
+    this.capabilitiesPromise = null;
   }
 
   private pickWorkerSlot() {
@@ -146,6 +205,18 @@ export class Dj1000RenderPool {
 
   private handleWorkerMessage(_slot: WorkerSlot, message: WorkerResponse) {
     switch (message.type) {
+      case "capabilities": {
+        const pending = this.pendingCapabilities.get(message.requestId);
+        if (pending) {
+          this.pendingCapabilities.delete(message.requestId);
+          if (message.error) {
+            pending.reject(new Error(message.error));
+          } else {
+            pending.resolve({ supportsDng: message.supportsDng });
+          }
+        }
+        return;
+      }
       case "document-opened": {
         const pending = this.pendingOpens.get(message.photoId);
         if (pending) {
@@ -178,6 +249,22 @@ export class Dj1000RenderPool {
         const pending = this.pendingRenders.get(message.requestId);
         if (pending) {
           this.pendingRenders.delete(message.requestId);
+          pending.reject(new Error(message.error));
+        }
+        return;
+      }
+      case "convert-dng-complete": {
+        const pending = this.pendingDngConversions.get(message.requestId);
+        if (pending) {
+          this.pendingDngConversions.delete(message.requestId);
+          pending.resolve(new Uint8Array(message.bytes));
+        }
+        return;
+      }
+      case "convert-dng-error": {
+        const pending = this.pendingDngConversions.get(message.requestId);
+        if (pending) {
+          this.pendingDngConversions.delete(message.requestId);
           pending.reject(new Error(message.error));
         }
         return;

@@ -1,8 +1,9 @@
 export type LibraryView = "library" | "develop";
 export type ImportKind = "files" | "folder";
 export type IngestMode = "in-place" | "copy";
+export type LibraryImportMode = "add" | "replace";
 export type ExportScope = "current" | "selected" | "all";
-export type ExportFormat = "png" | "jpeg";
+export type ExportFormat = "png" | "jpeg" | "dng";
 export type RenderIntent = "thumbnail" | "preview" | "export";
 export type RenderSize = "small" | "normal" | "large";
 export type PhotoReviewStatus = "none" | "flagged" | "rejected";
@@ -69,6 +70,7 @@ export interface PhotoRecord {
   id: string;
   name: string;
   relativePath: string;
+  importedAt: number;
   filePath?: string;
   sidecarPath?: string | null;
   ingestMode: IngestMode;
@@ -92,6 +94,7 @@ export interface ImportRequest {
 export interface ImportDialogState {
   kind: ImportKind;
   ingestMode: IngestMode;
+  libraryImportMode: LibraryImportMode;
   isOpen: boolean;
 }
 
@@ -105,6 +108,7 @@ export interface ExportDialogState {
 export interface ImportedPhotoPayload {
   name: string;
   relativePath: string;
+  importedAt?: number;
   filePath?: string;
   sidecarPath?: string | null;
   ingestMode: IngestMode;

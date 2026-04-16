@@ -48,6 +48,7 @@ export function createPhotoRecord(payload: ImportedPhotoPayload): PhotoRecord {
     id: crypto.randomUUID(),
     name: payload.name,
     relativePath: payload.relativePath,
+    importedAt: payload.importedAt ?? Date.now(),
     filePath: payload.filePath,
     sidecarPath: payload.sidecarPath ?? null,
     ingestMode: payload.ingestMode,

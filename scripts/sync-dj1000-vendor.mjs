@@ -6,7 +6,23 @@ const appRoot = process.cwd();
 const libraryRoot = process.env.DJ1000_LIB_DIR
   ? path.resolve(appRoot, process.env.DJ1000_LIB_DIR)
   : path.resolve(appRoot, "../dj1000-converter-lib");
-const wasmBuildDir = path.join(libraryRoot, "build-wasm", "native");
+const wasmBuildDir = process.env.DJ1000_WASM_BUILD_DIR
+  ? path.resolve(appRoot, process.env.DJ1000_WASM_BUILD_DIR)
+  : await (async () => {
+      const candidates = [
+        path.join(libraryRoot, "build-wasm-ui", "native"),
+        path.join(libraryRoot, "build-wasm", "native"),
+      ];
+      for (const candidate of candidates) {
+        try {
+          await access(candidate);
+          return candidate;
+        } catch {
+          // Try the next candidate.
+        }
+      }
+      return candidates[0];
+    })();
 const targetDir = path.join(appRoot, "public", "vendor", "dj1000");
 
 const requiredFiles = [

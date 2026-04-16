@@ -1,5 +1,4 @@
 import {
-  startTransition,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -14,7 +13,9 @@ import {
 import {
   buildBrowserExportArchiveWithProgress,
   buildBrowserExportBundle,
+  buildBrowserDngExportBundle,
   buildDesktopExportPayload,
+  buildDesktopDngExportPayload,
   triggerBrowserDownload,
 } from "./lib/exporters";
 import { createTransformedFrameCanvas, drawFrameToCanvas, getTransformedFrameSize } from "./lib/frameTransforms";
@@ -27,6 +28,7 @@ import type {
   ExportScope,
   ImportDialogState,
   ImportKind,
+  LibraryImportMode,
   PhotoEdits,
   PhotoMetadata,
   PhotoRecord,
@@ -49,6 +51,9 @@ const colorBalanceLabels = [
 
 const zoomPercentOptions = [25, 50, 75, 100, 125, 150, 200, 250, 300, 350, 400] as const;
 const fitViewportSafetyMarginPx = 2;
+const exampleDatFiles = ["MDSC0001.DAT", "MDSC0003.DAT", "MDSC0005.DAT", "MDSC0010.DAT"] as const;
+const hasLoadedOwnPhotosStorageKey = "dj1000.hasLoadedOwnPhotos";
+const examplePhotoPathPrefix = "Example .DAT Files/";
 
 type ReviewFilter = "all" | "picked" | "rejected" | "not-rejected";
 
@@ -72,8 +77,34 @@ function buildBrowserArchiveName(scope: ExportScope, photos: PhotoRecord[]) {
   return "all-photos.zip";
 }
 
+function buildDngArchiveName(fileCount: number) {
+  return fileCount === 1 ? "converted-dng.zip" : "converted-dng-files.zip";
+}
+
+function summarizeFailedFiles(names: string[], limit = 5) {
+  if (names.length === 0) {
+    return "";
+  }
+  if (names.length <= limit) {
+    return names.join(", ");
+  }
+  return `${names.slice(0, limit).join(", ")}, and ${names.length - limit} more`;
+}
+
 function comparePhotoNames(left: PhotoRecord, right: PhotoRecord) {
-  return left.name.localeCompare(right.name, undefined, {
+  if (left.importedAt !== right.importedAt) {
+    return left.importedAt - right.importedAt;
+  }
+
+  const byName = left.name.localeCompare(right.name, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+  if (byName !== 0) {
+    return byName;
+  }
+
+  return left.relativePath.localeCompare(right.relativePath, undefined, {
     numeric: true,
     sensitivity: "base",
   });
@@ -124,6 +155,12 @@ function describeOrientation(edits: PhotoEdits) {
   return parts.length > 0 ? parts.join(" · ") : "Standard";
 }
 
+function getDownloadFileName(path: string) {
+  const normalized = path.replaceAll("\\", "/");
+  const lastSlash = normalized.lastIndexOf("/");
+  return lastSlash >= 0 ? normalized.slice(lastSlash + 1) : normalized;
+}
+
 function matchesReviewFilter(photo: PhotoRecord, reviewFilter: ReviewFilter) {
   switch (reviewFilter) {
     case "picked":
@@ -141,18 +178,19 @@ function matchesReviewFilter(photo: PhotoRecord, reviewFilter: ReviewFilter) {
 function PhotoCanvas({
   frame,
   edits,
-  zoomMode,
   zoomPercent,
   onFitZoomChange,
 }: {
   frame?: RenderedFrame;
   edits?: PhotoEdits;
-  zoomMode: "fit" | "custom";
   zoomPercent: number;
   onFitZoomChange: (zoomPercent: number) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [isCompactLayout, setIsCompactLayout] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 960px)").matches : false,
+  );
   const outputSize = frame && edits ? getTransformedFrameSize(frame, edits) : { width: 504, height: 378 };
 
   useEffect(() => {
@@ -164,6 +202,19 @@ function PhotoCanvas({
     drawFrameToCanvas(canvas, frame, edits);
   }, [edits, frame]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia("(max-width: 960px)");
+    const updateLayoutMode = () => setIsCompactLayout(mediaQuery.matches);
+
+    updateLayoutMode();
+    mediaQuery.addEventListener("change", updateLayoutMode);
+    return () => mediaQuery.removeEventListener("change", updateLayoutMode);
+  }, []);
+
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport || !frame || !edits) {
@@ -173,7 +224,9 @@ function PhotoCanvas({
     const updateFitZoom = () => {
       const width = Math.max(1, viewport.clientWidth - fitViewportSafetyMarginPx);
       const height = Math.max(1, viewport.clientHeight - fitViewportSafetyMarginPx);
-      const scale = Math.min(width / outputSize.width, height / outputSize.height);
+      const scale = isCompactLayout
+        ? width / outputSize.width
+        : Math.min(width / outputSize.width, height / outputSize.height);
       const nextZoom = Math.max(5, scale * 100);
       onFitZoomChange(nextZoom);
     };
@@ -182,12 +235,11 @@ function PhotoCanvas({
     const observer = new ResizeObserver(updateFitZoom);
     observer.observe(viewport);
     return () => observer.disconnect();
-  }, [edits, frame, onFitZoomChange, outputSize.height, outputSize.width]);
+  }, [edits, frame, isCompactLayout, onFitZoomChange, outputSize.height, outputSize.width]);
 
-  const effectiveZoomPercent = zoomMode === "fit" ? zoomPercent : zoomPercent;
   const canvasStyle = {
-    width: `${Math.max(1, Math.floor((outputSize.width * effectiveZoomPercent) / 100))}px`,
-    height: `${Math.max(1, Math.floor((outputSize.height * effectiveZoomPercent) / 100))}px`,
+    width: `${Math.max(1, Math.floor((outputSize.width * zoomPercent) / 100))}px`,
+    height: `${Math.max(1, Math.floor((outputSize.height * zoomPercent) / 100))}px`,
   };
 
   return (
@@ -363,14 +415,18 @@ function AppMenu({
   photosLoaded,
   isDevelopMode,
   canPasteEdits,
+  dngSupported,
   openMenu,
   onOpenMenu,
   onCloseMenu,
-  onImportFiles,
-  onImportFolder,
+  onLoadDatFiles,
+  onConvertDatFilesToDng,
   onExportCurrent,
   onExportSelected,
   onExportAll,
+  onGenerateRawCurrent,
+  onGenerateRawSelected,
+  onGenerateRawAll,
   showRemoved,
   onToggleShowRemoved,
   onSelectAll,
@@ -384,18 +440,26 @@ function AppMenu({
   onFlipCurrentVertical,
   onShowLibrary,
   onShowDevelop,
+  minimumRating,
+  onSetMinimumRating,
+  reviewFilter,
+  onSetReviewFilter,
 }: {
   photosLoaded: boolean;
   isDevelopMode: boolean;
   canPasteEdits: boolean;
+  dngSupported: boolean;
   openMenu: string | null;
   onOpenMenu: (menu: string | null) => void;
   onCloseMenu: () => void;
-  onImportFiles: () => void;
-  onImportFolder: () => void;
+  onLoadDatFiles: () => void;
+  onConvertDatFilesToDng: () => void;
   onExportCurrent: () => void;
   onExportSelected: () => void;
   onExportAll: () => void;
+  onGenerateRawCurrent: () => void;
+  onGenerateRawSelected: () => void;
+  onGenerateRawAll: () => void;
   showRemoved: boolean;
   onToggleShowRemoved: () => void;
   onSelectAll: () => void;
@@ -409,9 +473,19 @@ function AppMenu({
   onFlipCurrentVertical: () => void;
   onShowLibrary: () => void;
   onShowDevelop: () => void;
+  minimumRating: number;
+  onSetMinimumRating: (rating: number) => void;
+  reviewFilter: ReviewFilter;
+  onSetReviewFilter: (reviewFilter: ReviewFilter) => void;
 }) {
+  const runMenuAction = (action: () => void) => () => {
+    onCloseMenu();
+    action();
+  };
+  const withCheck = (active: boolean, label: string) => `${active ? "✓ " : ""}${label}`;
+
   return (
-    <div className="menu-strip" onMouseLeave={onCloseMenu}>
+    <div className="menu-strip">
       <div className="menu-anchor">
         <button className="menu-button" onClick={() => onOpenMenu(openMenu === "file" ? null : "file")}>
           File
@@ -419,24 +493,43 @@ function AppMenu({
         {openMenu === "file" && (
           <div className="window menu-dropdown">
             <div className="window-body context-menu-body">
-              <button className="context-menu-item" onClick={onImportFiles}>
-                Open Files…
+              <button className="context-menu-item" onClick={runMenuAction(onLoadDatFiles)}>
+                Import .DAT Files into Library
               </button>
-              <button className="context-menu-item" onClick={onImportFolder}>
-                Open Folder…
-              </button>
+              {dngSupported ? (
+                <>
+                  <div className="context-menu-separator" />
+                  <button className="context-menu-item" onClick={runMenuAction(onConvertDatFilesToDng)}>
+                    Generate RAW Files from .DATs
+                  </button>
+                </>
+              ) : null}
               <div className="context-menu-separator" />
-              <button className="context-menu-item" disabled={!photosLoaded || !isDevelopMode} onClick={onExportCurrent}>
+              <button className="context-menu-item" disabled={!photosLoaded || !isDevelopMode} onClick={runMenuAction(onExportCurrent)}>
                 Export Current
               </button>
-              <button className="context-menu-item" disabled={!photosLoaded} onClick={onExportSelected}>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(onExportSelected)}>
                 Export Selected
               </button>
-              <button className="context-menu-item" disabled={!photosLoaded} onClick={onExportAll}>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(onExportAll)}>
                 Export All
               </button>
+              {dngSupported ? (
+                <>
+                  <div className="context-menu-separator" />
+                  <button className="context-menu-item" disabled={!photosLoaded || !isDevelopMode} onClick={runMenuAction(onGenerateRawCurrent)}>
+                    Generate RAW from Current
+                  </button>
+                  <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(onGenerateRawSelected)}>
+                    Generate RAW(s) from Selected
+                  </button>
+                  <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(onGenerateRawAll)}>
+                    Generate RAWs for Entire Library
+                  </button>
+                </>
+              ) : null}
               <div className="context-menu-separator" />
-              <button className="context-menu-item" onClick={onToggleShowRemoved}>
+              <button className="context-menu-item" onClick={runMenuAction(onToggleShowRemoved)}>
                 {showRemoved ? "Hide Removed Photos" : "Show Removed Photos"}
               </button>
             </div>
@@ -451,33 +544,33 @@ function AppMenu({
         {openMenu === "edit" && (
           <div className="window menu-dropdown">
             <div className="window-body context-menu-body">
-              <button className="context-menu-item" disabled={!photosLoaded} onClick={onSelectAll}>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(onSelectAll)}>
                 Select All
               </button>
-              <button className="context-menu-item" disabled={!photosLoaded} onClick={onClearSelection}>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(onClearSelection)}>
                 Clear Selection
               </button>
               <div className="context-menu-separator" />
-              <button className="context-menu-item" disabled={!isDevelopMode} onClick={onCopyCurrentEdits}>
+              <button className="context-menu-item" disabled={!isDevelopMode} onClick={runMenuAction(onCopyCurrentEdits)}>
                 Copy Edits
               </button>
-              <button className="context-menu-item" disabled={!isDevelopMode || !canPasteEdits} onClick={onPasteCurrentEdits}>
+              <button className="context-menu-item" disabled={!isDevelopMode || !canPasteEdits} onClick={runMenuAction(onPasteCurrentEdits)}>
                 Paste Edits
               </button>
-              <button className="context-menu-item" disabled={!isDevelopMode} onClick={onResetCurrent}>
+              <button className="context-menu-item" disabled={!isDevelopMode} onClick={runMenuAction(onResetCurrent)}>
                 Reset Current Photo
               </button>
               <div className="context-menu-separator" />
-              <button className="context-menu-item" disabled={!isDevelopMode} onClick={onRotateCurrentLeft}>
+              <button className="context-menu-item" disabled={!isDevelopMode} onClick={runMenuAction(onRotateCurrentLeft)}>
                 Rotate Left
               </button>
-              <button className="context-menu-item" disabled={!isDevelopMode} onClick={onRotateCurrentRight}>
+              <button className="context-menu-item" disabled={!isDevelopMode} onClick={runMenuAction(onRotateCurrentRight)}>
                 Rotate Right
               </button>
-              <button className="context-menu-item" disabled={!isDevelopMode} onClick={onFlipCurrentHorizontal}>
+              <button className="context-menu-item" disabled={!isDevelopMode} onClick={runMenuAction(onFlipCurrentHorizontal)}>
                 Flip Horizontal
               </button>
-              <button className="context-menu-item" disabled={!isDevelopMode} onClick={onFlipCurrentVertical}>
+              <button className="context-menu-item" disabled={!isDevelopMode} onClick={runMenuAction(onFlipCurrentVertical)}>
                 Flip Vertical
               </button>
             </div>
@@ -492,11 +585,43 @@ function AppMenu({
         {openMenu === "view" && (
           <div className="window menu-dropdown">
             <div className="window-body context-menu-body">
-              <button className="context-menu-item" onClick={onShowLibrary}>
+              <button className="context-menu-item" onClick={runMenuAction(onShowLibrary)}>
                 Library
               </button>
-              <button className="context-menu-item" disabled={!photosLoaded} onClick={onShowDevelop}>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(onShowDevelop)}>
                 Develop
+              </button>
+              <div className="context-menu-separator" />
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(() => onSetMinimumRating(0))}>
+                {withCheck(minimumRating === 0, "All Ratings")}
+              </button>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(() => onSetMinimumRating(1))}>
+                {withCheck(minimumRating === 1, "1 Star or More")}
+              </button>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(() => onSetMinimumRating(2))}>
+                {withCheck(minimumRating === 2, "2 Stars or More")}
+              </button>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(() => onSetMinimumRating(3))}>
+                {withCheck(minimumRating === 3, "3 Stars or More")}
+              </button>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(() => onSetMinimumRating(4))}>
+                {withCheck(minimumRating === 4, "4 Stars or More")}
+              </button>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(() => onSetMinimumRating(5))}>
+                {withCheck(minimumRating === 5, "5 Stars Only")}
+              </button>
+              <div className="context-menu-separator" />
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(() => onSetReviewFilter("all"))}>
+                {withCheck(reviewFilter === "all", "All Photos")}
+              </button>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(() => onSetReviewFilter("picked"))}>
+                {withCheck(reviewFilter === "picked", "Picked Only")}
+              </button>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(() => onSetReviewFilter("rejected"))}>
+                {withCheck(reviewFilter === "rejected", "Rejected Only")}
+              </button>
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(() => onSetReviewFilter("not-rejected"))}>
+                {withCheck(reviewFilter === "not-rejected", "Hide Rejected")}
               </button>
             </div>
           </div>
@@ -508,16 +633,22 @@ function AppMenu({
 
 function ImportDialog({
   state,
+  desktopAvailable,
+  photosLoaded,
   onClose,
-  onChangeKind,
   onChangeIngest,
-  onRun,
+  onChangeLibraryImportMode,
+  onChooseFiles,
+  onChooseFolder,
 }: {
   state: ImportDialogState;
+  desktopAvailable: boolean;
+  photosLoaded: boolean;
   onClose: () => void;
-  onChangeKind: (kind: ImportKind) => void;
   onChangeIngest: (ingestMode: ImportDialogState["ingestMode"]) => void;
-  onRun: () => void;
+  onChangeLibraryImportMode: (libraryImportMode: LibraryImportMode) => void;
+  onChooseFiles: () => void;
+  onChooseFolder: () => void;
 }) {
   if (!state.isOpen) {
     return null;
@@ -527,38 +658,95 @@ function ImportDialog({
     <div className="dialog-backdrop">
       <div className="window dialog-window">
         <div className="title-bar">
-          <div className="title-bar-text">Import DJ1000 Photos</div>
+          <div className="title-bar-text">Import .DAT Files into Library</div>
           <div className="title-bar-controls">
             <button aria-label="Close" onClick={onClose} />
           </div>
         </div>
         <div className="window-body field-column">
-          <div className="field-row-stacked">
-            <label htmlFor="import-kind">Source</label>
-            <select id="import-kind" value={state.kind} onChange={(event) => onChangeKind(event.target.value as ImportKind)}>
-              <option value="files">Open one or more DAT files</option>
-              <option value="folder">Open a folder of DAT files</option>
-            </select>
-          </div>
-
-          <div className="field-row-stacked">
-            <label htmlFor="ingest-mode">How to work with the files</label>
-            <select
-              id="ingest-mode"
-              value={state.ingestMode}
-              onChange={(event) => onChangeIngest(event.target.value as ImportDialogState["ingestMode"])}
-            >
-              <option value="in-place">Work with files where they already are</option>
-              <option value="copy">Copy imported DAT files to a new folder</option>
-            </select>
-          </div>
-
           <p className="field-help">
-            Desktop app mode can work directly from removable media or copy the files into a new folder.
+            Import .DAT files into the library to be viewed and edited using image processing algorithms faithful to the original conversion software.
+          </p>
+
+          {photosLoaded ? (
+            <div className="field-row-stacked">
+              <label htmlFor="library-import-mode">When loading new photos</label>
+              <select
+                id="library-import-mode"
+                value={state.libraryImportMode}
+                onChange={(event) => onChangeLibraryImportMode(event.target.value as LibraryImportMode)}
+              >
+                <option value="add">Add them to the current library</option>
+                <option value="replace">Replace the current library</option>
+              </select>
+            </div>
+          ) : null}
+
+          {desktopAvailable ? (
+            <>
+              <div className="field-row-stacked">
+                <label htmlFor="ingest-mode">How to work with the files</label>
+                <select
+                  id="ingest-mode"
+                  value={state.ingestMode}
+                  onChange={(event) => onChangeIngest(event.target.value as ImportDialogState["ingestMode"])}
+                >
+                  <option value="in-place">Work with files where they already are</option>
+                  <option value="copy">Copy imported .DAT files to a new folder</option>
+                </select>
+              </div>
+
+              <p className="field-help">
+                Desktop app mode can work directly from removable media or copy the files into a new folder.
+              </p>
+            </>
+          ) : (
+            null
+          )}
+
+          <div className="dialog-actions">
+            <button onClick={onChooseFiles}>Choose Files</button>
+            <button onClick={onChooseFolder}>Choose Folder</button>
+            <button onClick={onClose}>Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConvertDatToDngDialog({
+  isOpen,
+  onClose,
+  onChooseFiles,
+  onChooseFolder,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  onChooseFiles: () => void;
+  onChooseFolder: () => void;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="dialog-backdrop">
+      <div className="window dialog-window">
+        <div className="title-bar">
+          <div className="title-bar-text">Generate RAW Files from .DATs</div>
+          <div className="title-bar-controls">
+            <button aria-label="Close" onClick={onClose} />
+          </div>
+        </div>
+        <div className="window-body field-column">
+          <p className="field-help">
+            Generate RAW .DNG images from .DAT files to be edited in third-party software using modern image processing for improved dynamic range, exposure latitude, and cleaner details.
           </p>
 
           <div className="dialog-actions">
-            <button onClick={onRun}>Continue</button>
+            <button onClick={onChooseFiles}>Choose Files</button>
+            <button onClick={onChooseFolder}>Choose Folder</button>
             <button onClick={onClose}>Cancel</button>
           </div>
         </div>
@@ -570,6 +758,7 @@ function ImportDialog({
 function ExportDialog({
   state,
   desktopAvailable,
+  dngSupported,
   currentDisabled,
   selectedDisabled,
   allDisabled,
@@ -579,6 +768,7 @@ function ExportDialog({
 }: {
   state: ExportDialogState;
   desktopAvailable: boolean;
+  dngSupported: boolean;
   currentDisabled: boolean;
   selectedDisabled: boolean;
   allDisabled: boolean;
@@ -628,6 +818,7 @@ function ExportDialog({
             >
               <option value="png">PNG (lossless)</option>
               <option value="jpeg">JPEG (compressed)</option>
+              {dngSupported ? <option value="dng">DNG RAW File (modern export)</option> : null}
             </select>
           </div>
 
@@ -646,7 +837,12 @@ function ExportDialog({
 
           {!desktopAvailable ? (
             <p className="field-help">
-              Website exports download as a single ZIP file so everything stays together.
+              Website exports download as a single file when possible, or as a ZIP file when multiple files need to stay together.
+            </p>
+          ) : null}
+          {state.format === "dng" ? (
+            <p className="field-help">
+              DNG RAW exports use the modern raw conversion path and do not apply the legacy Develop adjustments shown in this editor.
             </p>
           ) : null}
 
@@ -660,18 +856,22 @@ function ExportDialog({
   );
 }
 
-function ExportProgressDialog({
+function ProgressDialog({
+  title,
   active,
   message,
   completed,
   total,
   percent,
+  summary,
 }: {
+  title: string;
   active: boolean;
   message: string;
   completed: number;
   total: number;
   percent: number;
+  summary?: string;
 }) {
   if (!active) {
     return null;
@@ -681,7 +881,7 @@ function ExportProgressDialog({
     <div className="dialog-backdrop">
       <div className="window progress-window">
         <div className="title-bar">
-          <div className="title-bar-text">Processing Export</div>
+          <div className="title-bar-text">{title}</div>
           <div className="title-bar-controls">
             <button aria-label="Busy" disabled />
           </div>
@@ -691,9 +891,53 @@ function ExportProgressDialog({
           <div className="sunken-panel progress-meter">
             <div className="progress-meter-fill" style={{ width: `${percent}%` }} />
           </div>
-          <p className="field-help">
-            {completed} of {total} photo{total === 1 ? "" : "s"} finished
-          </p>
+          <p className="field-help">{summary ?? `${completed} of ${total} item${total === 1 ? "" : "s"} finished`}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ExportIssuesDialog({
+  isOpen,
+  title,
+  summary,
+  failedFiles,
+  onClose,
+}: {
+  isOpen: boolean;
+  title: string;
+  summary: string;
+  failedFiles: string[];
+  onClose: () => void;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="dialog-backdrop">
+      <div className="window modal-window">
+        <div className="title-bar">
+          <div className="title-bar-text">{title}</div>
+          <div className="title-bar-controls">
+            <button aria-label="Close" onClick={onClose} />
+          </div>
+        </div>
+        <div className="window-body field-column">
+          <p>{summary}</p>
+          {failedFiles.length > 0 ? (
+            <div className="sunken-panel" style={{ maxHeight: "14rem", overflowY: "auto", padding: "8px" }}>
+              <ul style={{ margin: 0, paddingLeft: "1.25rem" }}>
+                {failedFiles.map((file) => (
+                  <li key={file}>{file}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          <div className="dialog-actions">
+            <button onClick={onClose}>OK</button>
+          </div>
         </div>
       </div>
     </div>
@@ -705,7 +949,9 @@ function PhotoContextMenu({
   x,
   y,
   canPasteEdits,
+  dngSupported,
   onOpenInDevelop,
+  onExportRawDng,
   onSetRating,
   onTogglePicked,
   onToggleRejected,
@@ -722,7 +968,9 @@ function PhotoContextMenu({
   x: number;
   y: number;
   canPasteEdits: boolean;
+  dngSupported: boolean;
   onOpenInDevelop: () => void;
+  onExportRawDng: () => void;
   onSetRating: (rating: number) => void;
   onTogglePicked: () => void;
   onToggleRejected: () => void;
@@ -765,6 +1013,11 @@ function PhotoContextMenu({
         <button className="context-menu-item" onClick={onOpenInDevelop}>
           Open In Develop
         </button>
+        {dngSupported ? (
+          <button className="context-menu-item" onClick={onExportRawDng}>
+            Export RAW .DNG
+          </button>
+        ) : null}
         <div className="context-menu-separator" />
         <div className="context-menu-section-label">Rating</div>
         <RatingStars rating={photo.metadata.rating} onSetRating={onSetRating} />
@@ -811,6 +1064,8 @@ export default function App() {
   const desktopBridge = getDesktopBridge();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
+  const dngConvertInputRef = useRef<HTMLInputElement | null>(null);
+  const dngConvertFolderInputRef = useRef<HTMLInputElement | null>(null);
   const renderPoolRef = useRef<Dj1000RenderPool | null>(null);
   const photosRef = useRef<PhotoRecord[]>([]);
   const saveTimersRef = useRef(new Map<string, number>());
@@ -833,7 +1088,9 @@ export default function App() {
     isOpen: false,
     kind: "files",
     ingestMode: "in-place",
+    libraryImportMode: "add",
   });
+  const [convertDatDialogOpen, setConvertDatDialogOpen] = useState(false);
   const [exportDialog, setExportDialog] = useState<ExportDialogState>({
     isOpen: false,
     scope: "current",
@@ -847,9 +1104,90 @@ export default function App() {
     total: 0,
     percent: 0,
   });
+  const [exportIssuesDialog, setExportIssuesDialog] = useState({
+    isOpen: false,
+    title: "",
+    summary: "",
+    failedFiles: [] as string[],
+  });
+  const [exampleImportProgress, setExampleImportProgress] = useState({
+    active: false,
+    message: "",
+    completed: 0,
+    total: 0,
+    percent: 0,
+  });
+  const [hasLoadedOwnPhotos, setHasLoadedOwnPhotos] = useState(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+    return window.localStorage.getItem(hasLoadedOwnPhotosStorageKey) === "true";
+  });
+  const [dngSupported, setDngSupported] = useState(false);
   const [previewZoomMode, setPreviewZoomMode] = useState<"fit" | "custom">("fit");
   const [previewZoomPercent, setPreviewZoomPercent] = useState(100);
   const [fitZoomPercent, setFitZoomPercent] = useState(100);
+  const [isMobileLayout, setIsMobileLayout] = useState(() =>
+    typeof window !== "undefined" ? window.matchMedia("(max-width: 720px)").matches : false,
+  );
+  const shellToolbarRef = useRef<HTMLDivElement | null>(null);
+  const importConvertMenuAnchorRef = useRef<HTMLDivElement | null>(null);
+  const exportMenuAnchorRef = useRef<HTMLDivElement | null>(null);
+  const lastLibraryTapRef = useRef<{ photoId: string; timestamp: number } | null>(null);
+  const activePhotoIdRef = useRef<string | null>(null);
+  const [toolbarMenuAlignment, setToolbarMenuAlignment] = useState({
+    importConvert: false,
+    export: false,
+  });
+
+  const openExportIssuesDialog = useCallback((title: string, summary: string, failedFiles: string[]) => {
+    setExportIssuesDialog({
+      isOpen: true,
+      title,
+      summary,
+      failedFiles,
+    });
+  }, []);
+
+  const updateToolbarMenuAlignment = useCallback(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const measureNeedsRightAlign = (anchor: HTMLDivElement | null) => {
+      if (!anchor) {
+        return false;
+      }
+      const dropdown = anchor.querySelector<HTMLElement>(".menu-dropdown");
+      if (!dropdown) {
+        return false;
+      }
+      const anchorRect = anchor.getBoundingClientRect();
+      const dropdownWidth = dropdown.offsetWidth;
+      return anchorRect.left + dropdownWidth > window.innerWidth - 8;
+    };
+
+    setToolbarMenuAlignment((current) => {
+      const next = {
+        importConvert: openMenu === "import-convert" ? measureNeedsRightAlign(importConvertMenuAnchorRef.current) : current.importConvert,
+        export: openMenu === "export" ? measureNeedsRightAlign(exportMenuAnchorRef.current) : current.export,
+      };
+
+      if (openMenu !== "import-convert") {
+        next.importConvert = false;
+      }
+      if (openMenu !== "export") {
+        next.export = false;
+      }
+
+      return current.importConvert === next.importConvert && current.export === next.export ? current : next;
+    });
+  }, [openMenu]);
+
+  const updateActivePhotoId = useCallback((photoId: string | null) => {
+    activePhotoIdRef.current = photoId;
+    setActivePhotoId(photoId);
+  }, []);
 
   const activePhoto = useMemo(
     () => photos.find((photo) => photo.id === activePhotoId) ?? null,
@@ -889,6 +1227,11 @@ export default function App() {
     () => visiblePhotos.filter((photo) => selectedIds.has(photo.id)),
     [visiblePhotos, selectedIds],
   );
+  const hasOwnPhotosInLibrary = useMemo(
+    () => photos.some((photo) => !photo.relativePath.startsWith(examplePhotoPathPrefix)),
+    [photos],
+  );
+  const shouldShowExampleButton = !hasLoadedOwnPhotos && !hasOwnPhotosInLibrary;
   const contextMenuPhoto = useMemo(
     () => (contextMenu ? photos.find((photo) => photo.id === contextMenu.photoId) ?? null : null),
     [contextMenu, photos],
@@ -908,6 +1251,87 @@ export default function App() {
   useEffect(() => {
     photosRef.current = photos;
   }, [photos]);
+
+  useEffect(() => {
+    activePhotoIdRef.current = activePhotoId;
+  }, [activePhotoId]);
+
+  useEffect(() => {
+    if (!hasLoadedOwnPhotos && hasOwnPhotosInLibrary) {
+      markOwnPhotosLoaded();
+    }
+  }, [hasLoadedOwnPhotos, hasOwnPhotosInLibrary]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia("(max-width: 720px)");
+    const updateLayoutMode = () => setIsMobileLayout(mediaQuery.matches);
+
+    updateLayoutMode();
+    mediaQuery.addEventListener("change", updateLayoutMode);
+    return () => mediaQuery.removeEventListener("change", updateLayoutMode);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (openMenu !== "import-convert" && openMenu !== "export") {
+      return;
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      updateToolbarMenuAlignment();
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [openMenu, updateToolbarMenuAlignment]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const handleResize = () => updateToolbarMenuAlignment();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [updateToolbarMenuAlignment]);
+
+  useEffect(() => {
+    if (!isMobileLayout) {
+      return;
+    }
+
+    setPreviewZoomMode("fit");
+    setPreviewZoomPercent(fitZoomPercent);
+  }, [fitZoomPercent, isMobileLayout]);
+
+  useEffect(() => {
+    if (!openMenu) {
+      return;
+    }
+
+    const closeMenu = (event: PointerEvent) => {
+      const toolbar = shellToolbarRef.current;
+      if (toolbar && event.target instanceof Node && toolbar.contains(event.target)) {
+        return;
+      }
+      setOpenMenu(null);
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpenMenu(null);
+      }
+    };
+
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [openMenu]);
 
   useEffect(() => {
     if (!contextMenu) {
@@ -951,7 +1375,7 @@ export default function App() {
     }
 
     const nextActive = visiblePhotos[0] ?? null;
-    setActivePhotoId(nextActive?.id ?? null);
+    updateActivePhotoId(nextActive?.id ?? null);
 
     if (!nextActive) {
       setView("library");
@@ -964,11 +1388,18 @@ export default function App() {
       }
       return new Set([nextActive.id]);
     });
-  }, [activePhoto, activePhotoId, visiblePhotoIds, visiblePhotos]);
+  }, [activePhoto, activePhotoId, updateActivePhotoId, visiblePhotoIds, visiblePhotos]);
 
   useEffect(() => {
     const pool = new Dj1000RenderPool();
     renderPoolRef.current = pool;
+    void pool.getCapabilities()
+      .then((capabilities) => {
+        setDngSupported(capabilities.supportsDng);
+      })
+      .catch(() => {
+        setDngSupported(false);
+      });
     const activeSaveTimers = saveTimersRef.current;
     const activeThumbnailTimers = thumbnailTimersRef.current;
 
@@ -990,8 +1421,18 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!dngSupported && exportDialog.format === "dng") {
+      setExportDialog((current) => ({ ...current, format: "png" }));
+    }
+  }, [dngSupported, exportDialog.format]);
+
   const replacePhoto = useCallback((photoId: string, updater: (photo: PhotoRecord) => PhotoRecord) => {
-    setPhotos((current) => current.map((photo) => (photo.id === photoId ? updater(photo) : photo)));
+    setPhotos((current) => {
+      const next = current.map((photo) => (photo.id === photoId ? updater(photo) : photo));
+      photosRef.current = next;
+      return next;
+    });
   }, []);
 
   async function frameToThumbnailUrl(frame: RenderedFrame, edits: PhotoEdits) {
@@ -1103,6 +1544,34 @@ export default function App() {
       });
   }, [replacePhoto]);
 
+  const queuePreviewRender = useCallback((photo: Pick<PhotoRecord, "id" | "name" | "edits">) => {
+    const edits: PhotoEdits = {
+      size: photo.edits.size,
+      redBalance: photo.edits.redBalance,
+      greenBalance: photo.edits.greenBalance,
+      blueBalance: photo.edits.blueBalance,
+      contrast: photo.edits.contrast,
+      brightness: photo.edits.brightness,
+      vividness: photo.edits.vividness,
+      sharpness: photo.edits.sharpness,
+      rotation: 0,
+      flipHorizontal: false,
+      flipVertical: false,
+    };
+
+    const signature = buildPreviewSignature(photo.id, edits);
+    desiredPreviewRef.current = {
+      photoId: photo.id,
+      edits,
+      name: photo.name,
+      signature,
+    };
+
+    setStatus(`Rendering ${photo.name} in the develop view...`);
+    replacePhoto(photo.id, (entry) => ({ ...entry, previewStatus: "loading", error: undefined }));
+    void requestLatestPreview();
+  }, [replacePhoto, requestLatestPreview]);
+
   useEffect(() => {
     if (
       !activePhotoId ||
@@ -1118,31 +1587,23 @@ export default function App() {
       desiredPreviewRef.current = null;
       return;
     }
-
-    const edits: PhotoEdits = {
-      size: activeEditSize,
-      redBalance: activeRedBalance,
-      greenBalance: activeGreenBalance,
-      blueBalance: activeBlueBalance,
-      contrast: activeContrast,
-      brightness: activeBrightness,
-      vividness: activeVividness,
-      sharpness: activeSharpness,
-      rotation: 0,
-      flipHorizontal: false,
-      flipVertical: false,
-    };
-    const signature = buildPreviewSignature(activePhotoId, edits);
-    desiredPreviewRef.current = {
-      photoId: activePhotoId,
-      edits,
+    queuePreviewRender({
+      id: activePhotoId,
       name: activePhotoName,
-      signature,
-    };
-
-    setStatus(`Rendering ${activePhotoName} in the develop view...`);
-    replacePhoto(activePhotoId, (photo) => ({ ...photo, previewStatus: "loading", error: undefined }));
-    void requestLatestPreview();
+      edits: {
+        size: activeEditSize,
+        redBalance: activeRedBalance,
+        greenBalance: activeGreenBalance,
+        blueBalance: activeBlueBalance,
+        contrast: activeContrast,
+        brightness: activeBrightness,
+        vividness: activeVividness,
+        sharpness: activeSharpness,
+        rotation: 0,
+        flipHorizontal: false,
+        flipVertical: false,
+      },
+    });
   }, [
     activePhotoId,
     activePhotoName,
@@ -1154,25 +1615,102 @@ export default function App() {
     activeBrightness,
     activeVividness,
     activeSharpness,
-    replacePhoto,
-    requestLatestPreview,
+    queuePreviewRender,
+  ]);
+
+  useEffect(() => {
+    if (view !== "develop") {
+      return;
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        openMenu !== null ||
+        contextMenu !== null ||
+        importDialog.isOpen ||
+        convertDatDialogOpen ||
+        exportDialog.isOpen ||
+        exportProgress.active ||
+        exampleImportProgress.active ||
+        exportIssuesDialog.isOpen
+      ) {
+        return;
+      }
+
+      if (event.target instanceof HTMLElement) {
+        const interactiveTarget = event.target.closest("input, textarea, select, [contenteditable='true']");
+        if (interactiveTarget) {
+          return;
+        }
+      }
+
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        const currentIndex = visiblePhotos.findIndex((photo) => photo.id === activePhotoIdRef.current);
+        const nextPhoto = currentIndex > 0 ? visiblePhotos[currentIndex - 1] : null;
+        if (nextPhoto) {
+          updateActivePhotoId(nextPhoto.id);
+          if (nextPhoto.previewStatus === "idle") {
+            queuePreviewRender(nextPhoto);
+          }
+          setSelectedIds(new Set([nextPhoto.id]));
+        }
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        const currentIndex = visiblePhotos.findIndex((photo) => photo.id === activePhotoIdRef.current);
+        const nextPhoto =
+          currentIndex >= 0 && currentIndex < visiblePhotos.length - 1 ? visiblePhotos[currentIndex + 1] : null;
+        if (nextPhoto) {
+          updateActivePhotoId(nextPhoto.id);
+          if (nextPhoto.previewStatus === "idle") {
+            queuePreviewRender(nextPhoto);
+          }
+          setSelectedIds(new Set([nextPhoto.id]));
+        }
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [
+    contextMenu,
+    convertDatDialogOpen,
+    exampleImportProgress.active,
+    exportDialog.isOpen,
+    exportIssuesDialog.isOpen,
+    exportProgress.active,
+    importDialog.isOpen,
+    openMenu,
+    queuePreviewRender,
+    updateActivePhotoId,
+    view,
+    visiblePhotos,
   ]);
 
   async function hydrateImportedPhotos(
     payloads: ReturnType<typeof createPhotoRecord>[],
     preferredActiveId?: string | null,
-  ) {
+    onProgress?: (processed: number, total: number, photo: ReturnType<typeof createPhotoRecord>) => void,
+  ): Promise<number> {
     const pool = renderPoolRef.current;
     if (!pool || payloads.length === 0) {
-      return;
+      return 0;
     }
 
     setStatus(`Opening ${formatCount("photo", payloads.length)}...`);
-    for (const payload of payloads) {
+    let successCount = 0;
+    for (const [index, payload] of payloads.entries()) {
       try {
         await pool.openDocument(payload.id, payload.datBytes);
-        if (preferredActiveId && payload.id === preferredActiveId) {
-          setActivePhotoId(preferredActiveId);
+        successCount += 1;
+        if (preferredActiveId && payload.id === preferredActiveId && !activePhotoIdRef.current) {
+          updateActivePhotoId(preferredActiveId);
+          queuePreviewRender(payload);
         }
         void queueThumbnailRender(payload.id);
       } catch (error) {
@@ -1182,20 +1720,51 @@ export default function App() {
           previewStatus: "error",
           error: String(error instanceof Error ? error.message : error),
         }));
+      } finally {
+        onProgress?.(index + 1, payloads.length, payload);
       }
+    }
+
+    return successCount;
+  }
+
+  function markOwnPhotosLoaded() {
+    setHasLoadedOwnPhotos(true);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(hasLoadedOwnPhotosStorageKey, "true");
     }
   }
 
-  async function ingestPayloads(payloads: ReturnType<typeof createPhotoRecord>[]) {
+  async function ingestPayloads(
+    payloads: ReturnType<typeof createPhotoRecord>[],
+    options?: { markAsOwnImport?: boolean; libraryImportMode?: LibraryImportMode },
+  ) {
     if (payloads.length === 0) {
-      setStatus("No DAT files were found in that import selection.");
+      setStatus("No .DAT files were found in that import selection.");
       return;
     }
 
-    const preferredActiveId = !activePhotoId ? [...payloads].sort(comparePhotoNames)[0].id : null;
+    const libraryImportMode = options?.libraryImportMode ?? "add";
+    const shouldReplaceLibrary = libraryImportMode === "replace";
+    const preferredActiveId = shouldReplaceLibrary || !activePhotoId ? [...payloads].sort(comparePhotoNames)[0].id : null;
 
-    startTransition(() => {
-      setPhotos((current) => [...current, ...payloads]);
+    if (shouldReplaceLibrary) {
+      desiredPreviewRef.current = null;
+      activePreviewSignatureRef.current = null;
+      updateActivePhotoId(null);
+      for (const photo of photosRef.current) {
+        renderPoolRef.current?.closeDocument(photo.id);
+      }
+    }
+
+    if (shouldReplaceLibrary) {
+      photosRef.current = payloads;
+      setPhotos(payloads);
+      setSelectedIds(new Set(payloads.map((photo) => photo.id)));
+    } else {
+      const nextPhotos = [...photosRef.current, ...payloads];
+      photosRef.current = nextPhotos;
+      setPhotos(nextPhotos);
       setSelectedIds((current) => {
         const next = new Set(current);
         for (const photo of payloads) {
@@ -1203,26 +1772,35 @@ export default function App() {
         }
         return next;
       });
-    });
+    }
 
-    await hydrateImportedPhotos(payloads, preferredActiveId);
+    const successCount = await hydrateImportedPhotos(payloads, preferredActiveId);
+    if (options?.markAsOwnImport && successCount > 0) {
+      markOwnPhotosLoaded();
+    }
     setStatus(`Imported ${formatCount("photo", payloads.length)}.`);
   }
 
-  async function runDesktopImport() {
+  async function runDesktopImport(kind: ImportKind) {
     if (!desktopBridge) {
       return;
     }
 
+    const importedAt = Date.now();
+    const importOptions = {
+      ingestMode: importDialog.ingestMode,
+      libraryImportMode: importDialog.libraryImportMode,
+    };
     setImportDialog((current) => ({ ...current, isOpen: false }));
     const result = await desktopBridge.pickImport({
-      kind: importDialog.kind,
-      ingestMode: importDialog.ingestMode,
+      kind,
+      ingestMode: importOptions.ingestMode,
     });
     const payloads = result.entries.map((entry) =>
       createPhotoRecord({
         name: entry.name,
         relativePath: entry.relativePath,
+        importedAt,
         filePath: entry.filePath,
         sidecarPath: entry.sidecarPath,
         ingestMode: entry.ingestMode,
@@ -1230,7 +1808,7 @@ export default function App() {
         sidecarText: entry.sidecarText,
       }),
     );
-    await ingestPayloads(payloads);
+    await ingestPayloads(payloads, { markAsOwnImport: true, libraryImportMode: importOptions.libraryImportMode });
   }
 
   async function handleBrowserFileInput(_kind: ImportKind, event: ChangeEvent<HTMLInputElement>) {
@@ -1239,18 +1817,86 @@ export default function App() {
       return;
     }
 
-    const payloads = (await parseBrowserImport(files, "in-place")).map(createPhotoRecord);
+    const libraryImportMode = importDialog.libraryImportMode;
+    const importedAt = Date.now();
+    const payloads = (await parseBrowserImport(files, "in-place")).map((payload) => createPhotoRecord({ ...payload, importedAt }));
     event.target.value = "";
-    await ingestPayloads(payloads);
+    await ingestPayloads(payloads, { markAsOwnImport: true, libraryImportMode });
   }
 
-  function openImport(kind: ImportKind) {
+  async function loadExamplePhotos() {
+    const totalSteps = exampleDatFiles.length * 2;
+    const updateProgress = (message: string, completed: number) => {
+      setExampleImportProgress({
+        active: true,
+        message,
+        completed,
+        total: totalSteps,
+        percent: totalSteps === 0 ? 0 : Math.round((completed / totalSteps) * 100),
+      });
+    };
+
     setOpenMenu(null);
-    if (!desktopBridge) {
-      launchBrowserImport(kind);
-      return;
+    updateProgress("Preparing Example .DAT Files...", 0);
+
+    try {
+      const payloads: ReturnType<typeof createPhotoRecord>[] = [];
+      const importedAt = Date.now();
+
+      for (const [index, name] of exampleDatFiles.entries()) {
+        updateProgress(`Downloading ${name}...`, index);
+        const response = await fetch(new URL(`examples/${name}`, document.baseURI).toString());
+        if (!response.ok) {
+          throw new Error(`Could not download ${name}.`);
+        }
+
+        payloads.push(
+          createPhotoRecord({
+            name,
+            relativePath: `Example .DAT Files/${name}`,
+            importedAt,
+            ingestMode: "copy",
+            bytes: new Uint8Array(await response.arrayBuffer()),
+          }),
+        );
+        updateProgress(`Downloaded ${name}.`, index + 1);
+      }
+
+      const preferredActiveId = !activePhotoId ? [...payloads].sort(comparePhotoNames)[0]?.id ?? null : null;
+
+      const nextPhotos = [...photosRef.current, ...payloads];
+      photosRef.current = nextPhotos;
+      setPhotos(nextPhotos);
+      setSelectedIds((current) => {
+        const next = new Set(current);
+        for (const photo of payloads) {
+          next.add(photo.id);
+        }
+        return next;
+      });
+
+      await hydrateImportedPhotos(payloads, preferredActiveId, (processed, total, photo) => {
+        updateProgress(`Opening ${photo.name}...`, exampleDatFiles.length + processed);
+        if (processed === total) {
+          setStatus(`Loaded ${formatCount("example photo", payloads.length)}.`);
+        }
+      });
+    } catch (error) {
+      setStatus(`Example photos failed to load: ${String(error instanceof Error ? error.message : error)}`);
+    } finally {
+      setExampleImportProgress({
+        active: false,
+        message: "",
+        completed: 0,
+        total: 0,
+        percent: 0,
+      });
     }
-    setImportDialog((current) => ({ ...current, isOpen: true, kind }));
+  }
+
+  function openImport(kind: ImportKind = "files") {
+    setOpenMenu(null);
+    setImportDialog((current) => ({ ...current, isOpen: true, kind, libraryImportMode: "add" }));
   }
 
   function launchBrowserImport(kind: ImportKind) {
@@ -1261,14 +1907,182 @@ export default function App() {
     fileInputRef.current?.click();
   }
 
-  function handleImportRun() {
+  function handleImportRun(kind: ImportKind) {
     if (desktopBridge) {
-      void runDesktopImport();
+      void runDesktopImport(kind);
       return;
     }
-    const kind = importDialog.kind;
     setImportDialog((current) => ({ ...current, isOpen: false }));
     launchBrowserImport(kind);
+  }
+
+  async function runDesktopDngConversion(kind: ImportKind) {
+    if (!desktopBridge) {
+      return;
+    }
+
+    setConvertDatDialogOpen(false);
+    const result = await desktopBridge.pickImport({
+      kind,
+      ingestMode: "in-place",
+    });
+
+    const payloads = result.entries.map((entry) => ({
+      name: entry.name,
+      relativePath: entry.relativePath,
+      ingestMode: entry.ingestMode,
+      bytes: new Uint8Array(entry.bytes),
+      sidecarText: entry.sidecarText,
+    }));
+    await runStandaloneDngZipConversion(payloads);
+  }
+
+  function launchBrowserDngConvert(kind: ImportKind) {
+    if (kind === "folder") {
+      dngConvertFolderInputRef.current?.click();
+      return;
+    }
+    dngConvertInputRef.current?.click();
+  }
+
+  function openConvertDatToDng() {
+    setOpenMenu(null);
+    if (!dngSupported) {
+      setStatus("DNG export is unavailable in this build.");
+      return;
+    }
+    setConvertDatDialogOpen(true);
+  }
+
+  function handleConvertDatToDngRun(kind: ImportKind) {
+    if (desktopBridge) {
+      void runDesktopDngConversion(kind);
+      return;
+    }
+    setConvertDatDialogOpen(false);
+    launchBrowserDngConvert(kind);
+  }
+
+  async function runStandaloneDngZipConversion(
+    payloads: Array<Awaited<ReturnType<typeof parseBrowserImport>>[number]>,
+  ) {
+    if (payloads.length === 0) {
+      setStatus("No .DAT files were selected for DNG conversion.");
+      return;
+    }
+
+    const pool = renderPoolRef.current;
+    if (!pool || !dngSupported) {
+      setStatus("DNG conversion is not ready yet.");
+      return;
+    }
+
+    setStatus(`Converting ${formatCount(".DAT file", payloads.length)} to DNG...`);
+    setExportProgress({
+      active: true,
+      message: `Converting 1 of ${payloads.length}...`,
+      completed: 0,
+      total: payloads.length,
+      percent: 0,
+    });
+
+    try {
+      const archiveFiles = [];
+      const failedFiles: string[] = [];
+      let convertedCount = 0;
+      for (const [index, payload] of payloads.entries()) {
+        setExportProgress({
+          active: true,
+          message: `Converting ${payload.name} (${index + 1} of ${payloads.length})...`,
+          completed: index,
+          total: payloads.length,
+          percent: Math.round((index / Math.max(payloads.length, 1)) * 100),
+        });
+
+        try {
+          const dngBytes = await pool.convertDatToDng(payload.bytes);
+          archiveFiles.push({
+            name: payload.relativePath.replace(/\.dat$/i, ".dng"),
+            blob: new Blob([Uint8Array.from(dngBytes)], { type: "image/x-adobe-dng" }),
+          });
+          convertedCount += 1;
+        } catch (error) {
+          console.error(`DNG conversion failed for ${payload.name}:`, error);
+          failedFiles.push(payload.name);
+        }
+      }
+
+      if (archiveFiles.length === 0) {
+        setStatus(
+          `DNG conversion failed for all selected files. Failed: ${summarizeFailedFiles(failedFiles)}.`,
+        );
+        openExportIssuesDialog(
+          "RAW Generation Failed",
+          "None of the selected .DAT files could be converted to .DNG RAW files.",
+          failedFiles,
+        );
+        return;
+      }
+
+      const archive = await buildBrowserExportArchiveWithProgress(archiveFiles, (percent) => {
+        setExportProgress({
+          active: true,
+          message: `Creating DNG ZIP... ${Math.round(percent)}%`,
+          completed: payloads.length,
+          total: payloads.length,
+          percent: Math.round(percent),
+        });
+      });
+
+      const fileName = buildDngArchiveName(convertedCount);
+      if (desktopBridge) {
+        await desktopBridge.exportFiles({
+          files: [
+            {
+              relativePath: fileName,
+              bytes: await archive.arrayBuffer(),
+            },
+          ],
+          suggestedFolderName: "dj1000-dng-export",
+        });
+      } else {
+        triggerBrowserDownload(archive, fileName);
+      }
+
+      if (failedFiles.length > 0) {
+        setStatus(
+          `Converted ${formatCount(".DAT file", convertedCount)} to DNG ZIP. Skipped ${formatCount("failed file", failedFiles.length)}: ${summarizeFailedFiles(failedFiles)}.`,
+        );
+        openExportIssuesDialog(
+          "RAW Generation Completed with Skipped Files",
+          `Converted ${formatCount(".DAT file", convertedCount)} to .DNG RAW and skipped ${formatCount("file", failedFiles.length)}.`,
+          failedFiles,
+        );
+      } else {
+        setStatus(`Converted ${formatCount(".DAT file", convertedCount)} to DNG ZIP.`);
+      }
+    } catch (error) {
+      setStatus(`DNG conversion failed: ${String(error instanceof Error ? error.message : error)}`);
+    } finally {
+      setExportProgress({
+        active: false,
+        message: "",
+        completed: 0,
+        total: 0,
+        percent: 0,
+      });
+    }
+  }
+
+  async function handleBrowserDngConvertInput(event: ChangeEvent<HTMLInputElement>) {
+    const files = event.target.files;
+    if (!files || files.length === 0) {
+      return;
+    }
+
+    const payloads = await parseBrowserImport(files, "copy");
+    event.target.value = "";
+    await runStandaloneDngZipConversion(payloads);
   }
 
   function schedulePhotoPersistence(photo: PhotoRecord) {
@@ -1436,7 +2250,32 @@ export default function App() {
 
   function handleSelectPhoto(photoId: string, event?: MouseEvent<HTMLButtonElement>) {
     setContextMenu(null);
-    setActivePhotoId(photoId);
+
+    const isTouchLike =
+      typeof window !== "undefined" &&
+      (window.matchMedia("(pointer: coarse)").matches || window.matchMedia("(hover: none)").matches);
+    const now = Date.now();
+    const previousTap = lastLibraryTapRef.current;
+    const isRepeatedTouchTap =
+      isTouchLike &&
+      previousTap?.photoId === photoId &&
+      now - previousTap.timestamp <= 450;
+
+    lastLibraryTapRef.current = { photoId, timestamp: now };
+
+    if (isRepeatedTouchTap) {
+      setView("develop");
+      updateActivePhotoId(photoId);
+      setSelectedIds(new Set([photoId]));
+      lastLibraryTapRef.current = null;
+      return;
+    }
+
+    updateActivePhotoId(photoId);
+    const photo = photosRef.current.find((entry) => entry.id === photoId);
+    if (photo && photo.previewStatus === "idle") {
+      queuePreviewRender(photo);
+    }
 
     if (event?.metaKey || event?.ctrlKey) {
       setSelectedIds((current) => {
@@ -1457,7 +2296,7 @@ export default function App() {
   function handleOpenPhotoContextMenu(photoId: string, event: MouseEvent<HTMLButtonElement>) {
     event.preventDefault();
     setOpenMenu(null);
-    setActivePhotoId(photoId);
+    updateActivePhotoId(photoId);
     setSelectedIds((current) => (current.has(photoId) ? current : new Set([photoId])));
     setContextMenu({
       photoId,
@@ -1474,6 +2313,15 @@ export default function App() {
       return selectedPhotos.filter((photo) => !photo.metadata.removed);
     }
     return sortedPhotos.filter((photo) => !photo.metadata.removed);
+  }
+
+  function openExportDialogForScope(scope: ExportScope, format?: ExportDialogState["format"]) {
+    setExportDialog((current) => ({
+      ...current,
+      isOpen: true,
+      scope,
+      format: format ?? current.format,
+    }));
   }
 
   async function runExport() {
@@ -1497,6 +2345,8 @@ export default function App() {
     });
 
     try {
+      const failedFiles: string[] = [];
+      let succeededCount = 0;
       for (const [index, photo] of targets.entries()) {
         setExportProgress({
           active: true,
@@ -1506,24 +2356,65 @@ export default function App() {
           percent: Math.round((index / Math.max(targets.length, 1)) * 100),
         });
 
-        const frame = await renderPoolRef.current!.render(photo.id, photo.edits, "export");
-        if (desktopBridge) {
-          const files = await buildDesktopExportPayload(
-            photo,
-            frame,
-            exportDialog.format,
-            exportDialog.includeSourceBundle,
-          );
-          desktopFiles.push(...files);
-        } else {
-          const files = await buildBrowserExportBundle(
-            photo,
-            frame,
-            exportDialog.format,
-            exportDialog.includeSourceBundle,
-          );
-          browserFiles.push(...files);
+        try {
+          if (exportDialog.format === "dng") {
+            if (!dngSupported) {
+              throw new Error("DNG export is unavailable in this build.");
+            }
+            const dngBytes = await renderPoolRef.current!.convertDatToDng(photo.datBytes, photo.id);
+            if (desktopBridge) {
+              const files = buildDesktopDngExportPayload(
+                photo,
+                dngBytes,
+                exportDialog.includeSourceBundle,
+              );
+              desktopFiles.push(...files);
+            } else {
+              const files = buildBrowserDngExportBundle(
+                photo,
+                dngBytes,
+                exportDialog.includeSourceBundle,
+              );
+              browserFiles.push(...files);
+            }
+            succeededCount += 1;
+          } else {
+            const frame = await renderPoolRef.current!.render(photo.id, photo.edits, "export");
+            if (desktopBridge) {
+              const files = await buildDesktopExportPayload(
+                photo,
+                frame,
+                exportDialog.format,
+                exportDialog.includeSourceBundle,
+              );
+              desktopFiles.push(...files);
+            } else {
+              const files = await buildBrowserExportBundle(
+                photo,
+                frame,
+                exportDialog.format,
+                exportDialog.includeSourceBundle,
+              );
+              browserFiles.push(...files);
+            }
+            succeededCount += 1;
+          }
+        } catch (error) {
+          console.error(`Export failed for ${photo.name}:`, error);
+          failedFiles.push(photo.name);
         }
+      }
+
+      if (desktopBridge ? desktopFiles.length === 0 : browserFiles.length === 0) {
+        setStatus(
+          `Export failed for all selected files. Failed: ${summarizeFailedFiles(failedFiles)}.`,
+        );
+        openExportIssuesDialog(
+          "Export Failed",
+          "None of the selected photos could be exported.",
+          failedFiles,
+        );
+        return;
       }
 
       if (desktopBridge) {
@@ -1539,21 +2430,105 @@ export default function App() {
           suggestedFolderName: "dj1000-export",
         });
       } else {
-        const archive = await buildBrowserExportArchiveWithProgress(browserFiles, (percent) => {
+        if (browserFiles.length === 1) {
           setExportProgress({
             active: true,
-            message: `Creating ZIP file... ${Math.round(percent)}%`,
+            message: "Preparing download...",
             completed: targets.length,
             total: targets.length,
-            percent: Math.round(percent),
+            percent: 100,
           });
-        });
-        triggerBrowserDownload(archive, buildBrowserArchiveName(exportDialog.scope, targets));
+          triggerBrowserDownload(browserFiles[0].blob, getDownloadFileName(browserFiles[0].name));
+        } else {
+          const archive = await buildBrowserExportArchiveWithProgress(browserFiles, (percent) => {
+            setExportProgress({
+              active: true,
+              message: `Creating ZIP file... ${Math.round(percent)}%`,
+              completed: targets.length,
+              total: targets.length,
+              percent: Math.round(percent),
+            });
+          });
+          triggerBrowserDownload(archive, buildBrowserArchiveName(exportDialog.scope, targets));
+        }
       }
 
-      setStatus(`Exported ${formatCount("photo", targets.length)}.`);
+      if (failedFiles.length > 0) {
+        setStatus(
+          `Exported ${formatCount("photo", succeededCount)}. Skipped ${formatCount("failed file", failedFiles.length)}: ${summarizeFailedFiles(failedFiles)}.`,
+        );
+        openExportIssuesDialog(
+          "Export Completed with Skipped Files",
+          `Exported ${formatCount("photo", succeededCount)} and skipped ${formatCount("file", failedFiles.length)}.`,
+          failedFiles,
+        );
+      } else {
+        setStatus(`Exported ${formatCount("photo", succeededCount)}.`);
+      }
     } catch (error) {
       setStatus(`Export failed: ${String(error instanceof Error ? error.message : error)}`);
+    } finally {
+      setExportProgress({
+        active: false,
+        message: "",
+        completed: 0,
+        total: 0,
+        percent: 0,
+      });
+    }
+  }
+
+  async function exportSinglePhotoRawDng(photo: PhotoRecord) {
+    if (!dngSupported) {
+      setStatus("DNG export is unavailable in this build.");
+      return;
+    }
+
+    setContextMenu(null);
+    setStatus(`Preparing ${photo.name} for RAW .DNG export...`);
+    setExportProgress({
+      active: true,
+      message: `Converting ${photo.name}...`,
+      completed: 0,
+      total: 1,
+      percent: 0,
+    });
+
+    try {
+      const dngBytes = await renderPoolRef.current!.convertDatToDng(photo.datBytes, photo.id);
+
+      if (desktopBridge) {
+        setExportProgress({
+          active: true,
+          message: "Writing file...",
+          completed: 1,
+          total: 1,
+          percent: 100,
+        });
+        await desktopBridge.exportFiles({
+          files: buildDesktopDngExportPayload(photo, dngBytes, false),
+          suggestedFolderName: "dj1000-export",
+        });
+      } else {
+        const files = buildBrowserDngExportBundle(photo, dngBytes, false);
+        setExportProgress({
+          active: true,
+          message: "Preparing download...",
+          completed: 1,
+          total: 1,
+          percent: 100,
+        });
+        triggerBrowserDownload(files[0].blob, getDownloadFileName(files[0].name));
+      }
+
+      setStatus(`Exported ${photo.name} as RAW .DNG.`);
+    } catch (error) {
+      setStatus(`RAW .DNG export failed: ${String(error instanceof Error ? error.message : error)}`);
+      openExportIssuesDialog(
+        "RAW .DNG Export Failed",
+        `The selected photo could not be exported as a RAW .DNG file.`,
+        [photo.name],
+      );
     } finally {
       setExportProgress({
         active: false,
@@ -1568,6 +2543,8 @@ export default function App() {
   const platformLabel = isDesktopRuntime() ? "Desktop App" : "Website";
   const currentPreviewZoomPercent = previewZoomMode === "fit" ? fitZoomPercent : previewZoomPercent;
   const zoomSelectValue = previewZoomMode === "fit" ? "fit" : String(previewZoomPercent);
+  const browserImportAccept = isMobileLayout ? undefined : ".dat,.DAT,.json";
+  const browserDngConvertAccept = isMobileLayout ? undefined : ".dat,.DAT";
   const applyFitZoom = useCallback(() => {
     setPreviewZoomMode("fit");
     setPreviewZoomPercent(fitZoomPercent);
@@ -1580,7 +2557,7 @@ export default function App() {
         type="file"
         hidden
         multiple
-        accept=".dat,.DAT,.json"
+        accept={browserImportAccept}
         onChange={(event) => void handleBrowserFileInput("files", event)}
       />
       <input
@@ -1589,21 +2566,49 @@ export default function App() {
         hidden
         multiple
         webkitdirectory=""
-        accept=".dat,.DAT,.json"
+        accept={browserImportAccept}
         onChange={(event) => void handleBrowserFileInput("folder", event)}
+      />
+      <input
+        ref={dngConvertInputRef}
+        type="file"
+        hidden
+        multiple
+        accept={browserDngConvertAccept}
+        onChange={(event) => void handleBrowserDngConvertInput(event)}
+      />
+      <input
+        ref={dngConvertFolderInputRef}
+        type="file"
+        hidden
+        multiple
+        webkitdirectory=""
+        accept={browserDngConvertAccept}
+        onChange={(event) => void handleBrowserDngConvertInput(event)}
       />
 
       <ImportDialog
         state={importDialog}
+        desktopAvailable={!!desktopBridge}
+        photosLoaded={photos.length > 0}
         onClose={() => setImportDialog((current) => ({ ...current, isOpen: false }))}
-        onChangeKind={(kind) => setImportDialog((current) => ({ ...current, kind }))}
         onChangeIngest={(ingestMode) => setImportDialog((current) => ({ ...current, ingestMode }))}
-        onRun={handleImportRun}
+        onChangeLibraryImportMode={(libraryImportMode) => setImportDialog((current) => ({ ...current, libraryImportMode }))}
+        onChooseFiles={() => handleImportRun("files")}
+        onChooseFolder={() => handleImportRun("folder")}
+      />
+
+      <ConvertDatToDngDialog
+        isOpen={convertDatDialogOpen}
+        onClose={() => setConvertDatDialogOpen(false)}
+        onChooseFiles={() => handleConvertDatToDngRun("files")}
+        onChooseFolder={() => handleConvertDatToDngRun("folder")}
       />
 
       <ExportDialog
         state={exportDialog}
         desktopAvailable={!!desktopBridge}
+        dngSupported={dngSupported}
         currentDisabled={!activePhoto}
         selectedDisabled={selectedPhotos.length === 0}
         allDisabled={photos.length === 0}
@@ -1612,12 +2617,32 @@ export default function App() {
         onRun={() => void runExport()}
       />
 
-      <ExportProgressDialog
+      <ProgressDialog
+        title="Processing Export"
         active={exportProgress.active}
         message={exportProgress.message}
         completed={exportProgress.completed}
         total={exportProgress.total}
         percent={exportProgress.percent}
+        summary={`${exportProgress.completed} of ${exportProgress.total} photo${exportProgress.total === 1 ? "" : "s"} finished`}
+      />
+
+      <ProgressDialog
+        title="Loading Example .DAT Files"
+        active={exampleImportProgress.active}
+        message={exampleImportProgress.message}
+        completed={exampleImportProgress.completed}
+        total={exampleImportProgress.total}
+        percent={exampleImportProgress.percent}
+        summary={`${exampleImportProgress.completed} of ${exampleImportProgress.total} step${exampleImportProgress.total === 1 ? "" : "s"} finished`}
+      />
+
+      <ExportIssuesDialog
+        isOpen={exportIssuesDialog.isOpen}
+        title={exportIssuesDialog.title}
+        summary={exportIssuesDialog.summary}
+        failedFiles={exportIssuesDialog.failedFiles}
+        onClose={() => setExportIssuesDialog((current) => ({ ...current, isOpen: false }))}
       />
 
       {contextMenu && contextMenuPhoto ? (
@@ -1626,11 +2651,18 @@ export default function App() {
           x={contextMenu.x}
           y={contextMenu.y}
           canPasteEdits={copiedEdits !== null}
+          dngSupported={dngSupported}
           onOpenInDevelop={() => {
             setView("develop");
-            setActivePhotoId(contextMenuPhoto.id);
+            updateActivePhotoId(contextMenuPhoto.id);
+            if (contextMenuPhoto.previewStatus === "idle") {
+              queuePreviewRender(contextMenuPhoto);
+            }
             setSelectedIds(new Set([contextMenuPhoto.id]));
             setContextMenu(null);
+          }}
+          onExportRawDng={() => {
+            void exportSinglePhotoRawDng(contextMenuPhoto);
           }}
           onSetRating={(rating) => {
             setPhotoRating(contextMenuPhoto.id, rating);
@@ -1688,19 +2720,23 @@ export default function App() {
             <button aria-label="Close" />
           </div>
         </div>
-        <div className="shell-toolbar">
+        <div ref={shellToolbarRef} className="shell-toolbar">
           <AppMenu
             photosLoaded={photos.length > 0}
             isDevelopMode={view === "develop"}
             canPasteEdits={copiedEdits !== null}
+            dngSupported={dngSupported}
             openMenu={openMenu}
             onOpenMenu={setOpenMenu}
             onCloseMenu={() => setOpenMenu(null)}
-            onImportFiles={() => openImport("files")}
-            onImportFolder={() => openImport("folder")}
-            onExportCurrent={() => setExportDialog((current) => ({ ...current, isOpen: true, scope: "current" }))}
-            onExportSelected={() => setExportDialog((current) => ({ ...current, isOpen: true, scope: "selected" }))}
-            onExportAll={() => setExportDialog((current) => ({ ...current, isOpen: true, scope: "all" }))}
+            onLoadDatFiles={() => openImport()}
+            onConvertDatFilesToDng={openConvertDatToDng}
+            onExportCurrent={() => openExportDialogForScope("current")}
+            onExportSelected={() => openExportDialogForScope("selected")}
+            onExportAll={() => openExportDialogForScope("all")}
+            onGenerateRawCurrent={() => openExportDialogForScope("current", "dng")}
+            onGenerateRawSelected={() => openExportDialogForScope("selected", "dng")}
+            onGenerateRawAll={() => openExportDialogForScope("all", "dng")}
             showRemoved={showRemoved}
             onToggleShowRemoved={() => setShowRemoved((current) => !current)}
             onSelectAll={() => setSelectedIds(new Set(visiblePhotos.map((photo) => photo.id)))}
@@ -1714,38 +2750,150 @@ export default function App() {
             onFlipCurrentVertical={() => activePhoto && togglePhotoFlip(activePhoto.id, "vertical")}
             onShowLibrary={() => setView("library")}
             onShowDevelop={() => setView("develop")}
+            minimumRating={minimumRating}
+            onSetMinimumRating={setMinimumRating}
+            reviewFilter={reviewFilter}
+            onSetReviewFilter={setReviewFilter}
           />
 
-          <div className="menu-strip toolbar-action-menu" onMouseLeave={() => openMenu === "export" && setOpenMenu(null)}>
-            <button onClick={() => openImport("files")}>Import</button>
-            <div className="menu-anchor">
+          <div className="menu-strip toolbar-action-menu">
+            <div ref={importConvertMenuAnchorRef} className="menu-anchor">
+              <button onClick={() => setOpenMenu(openMenu === "import-convert" ? null : "import-convert")}>
+                Import / Convert
+              </button>
+              {openMenu === "import-convert" && (
+                <div className={`window menu-dropdown${toolbarMenuAlignment.importConvert ? " menu-dropdown-align-right" : ""}`}>
+                  <div className="window-body context-menu-body">
+                    <button
+                      className="context-menu-item"
+                      onClick={() => {
+                        setOpenMenu(null);
+                        openImport();
+                      }}
+                    >
+                      Import .DAT Files into Library
+                    </button>
+                    {dngSupported ? (
+                      <>
+                        <div className="context-menu-separator" />
+                        <button
+                          className="context-menu-item"
+                          onClick={() => {
+                            setOpenMenu(null);
+                            openConvertDatToDng();
+                          }}
+                        >
+                          Generate RAW Files from .DATs
+                        </button>
+                        <div className="context-menu-separator" />
+                        <button
+                          className="context-menu-item"
+                          disabled={!activePhoto}
+                          onClick={() => {
+                            setOpenMenu(null);
+                            openExportDialogForScope("current", "dng");
+                          }}
+                        >
+                          Generate RAW from Current
+                        </button>
+                        <button
+                          className="context-menu-item"
+                          disabled={selectedPhotos.length === 0}
+                          onClick={() => {
+                            setOpenMenu(null);
+                            openExportDialogForScope("selected", "dng");
+                          }}
+                        >
+                          Generate RAW(s) from Selected
+                        </button>
+                        <button
+                          className="context-menu-item"
+                          disabled={photos.length === 0}
+                          onClick={() => {
+                            setOpenMenu(null);
+                            openExportDialogForScope("all", "dng");
+                          }}
+                        >
+                          Generate RAWs for Entire Library
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div ref={exportMenuAnchorRef} className="menu-anchor">
               <button disabled={photos.length === 0} onClick={() => setOpenMenu(openMenu === "export" ? null : "export")}>
                 Export
               </button>
               {openMenu === "export" && (
-                <div className="window menu-dropdown">
+                <div className={`window menu-dropdown${toolbarMenuAlignment.export ? " menu-dropdown-align-right" : ""}`}>
                   <div className="window-body context-menu-body">
                     <button
                       className="context-menu-item"
                       disabled={!activePhoto}
-                      onClick={() => setExportDialog((current) => ({ ...current, isOpen: true, scope: "current" }))}
+                      onClick={() => {
+                        setOpenMenu(null);
+                        setExportDialog((current) => ({ ...current, isOpen: true, scope: "current" }));
+                      }}
                     >
                       Export Current
                     </button>
                     <button
                       className="context-menu-item"
                       disabled={selectedPhotos.length === 0}
-                      onClick={() => setExportDialog((current) => ({ ...current, isOpen: true, scope: "selected" }))}
+                      onClick={() => {
+                        setOpenMenu(null);
+                        setExportDialog((current) => ({ ...current, isOpen: true, scope: "selected" }));
+                      }}
                     >
                       Export Selected
                     </button>
                     <button
                       className="context-menu-item"
                       disabled={photos.length === 0}
-                      onClick={() => setExportDialog((current) => ({ ...current, isOpen: true, scope: "all" }))}
+                      onClick={() => {
+                        setOpenMenu(null);
+                        setExportDialog((current) => ({ ...current, isOpen: true, scope: "all" }));
+                      }}
                     >
                       Export All
                     </button>
+                    {dngSupported ? (
+                      <>
+                        <div className="context-menu-separator" />
+                        <button
+                          className="context-menu-item"
+                          disabled={!activePhoto}
+                          onClick={() => {
+                            setOpenMenu(null);
+                            openExportDialogForScope("current", "dng");
+                          }}
+                        >
+                          Generate RAW from Current
+                        </button>
+                        <button
+                          className="context-menu-item"
+                          disabled={selectedPhotos.length === 0}
+                          onClick={() => {
+                            setOpenMenu(null);
+                            openExportDialogForScope("selected", "dng");
+                          }}
+                        >
+                          Generate RAW(s) from Selected
+                        </button>
+                        <button
+                          className="context-menu-item"
+                          disabled={photos.length === 0}
+                          onClick={() => {
+                            setOpenMenu(null);
+                            openExportDialogForScope("all", "dng");
+                          }}
+                        >
+                          Generate RAWs for Entire Library
+                        </button>
+                      </>
+                    ) : null}
                   </div>
                 </div>
               )}
@@ -1763,7 +2911,7 @@ export default function App() {
         </div>
 
         <div className="workspace-grid status-bar-field" style={{backgroundColor: "#808080", gap: "8px", padding: "8px"}}>
-          <section className="window window-fill">
+          <section className="window window-fill navigator-window">
             <div className="title-bar">
               <div className="title-bar-text">Project Navigator</div>
               <div className="title-bar-controls">
@@ -1772,8 +2920,13 @@ export default function App() {
             </div>
             <div className="window-body window-body-fill">
               <div className="field-column">
-                <button onClick={() => openImport("files")}>Open DAT Files…</button>
-                <button onClick={() => openImport("folder")}>Open Folder…</button>
+                <button onClick={() => openImport()}>Import .DAT Files into Library</button>
+                {dngSupported ? <button onClick={openConvertDatToDng}>Generate RAW Files from .DATs</button> : null}
+                {shouldShowExampleButton ? (
+                  <button onClick={() => void loadExamplePhotos()} disabled={exampleImportProgress.active}>
+                    Open Example .DAT Files
+                  </button>
+                ) : null}
                 {!desktopBridge ? (
                   <p className="field-help compact-help">Your photos stay on this device. Nothing is uploaded.</p>
                 ) : null}
@@ -1902,16 +3055,26 @@ export default function App() {
                   <div className="placeholder-copy sunken-panel">
                     {photos.length === 0 ? (
                       <>
-                        <strong>Start with your camera photos</strong>
                         <span>
-                          Open a folder, memory card, or a few DAT files. You can browse everything in the library,
-                          then open one photo at a time with the rest waiting in the film strip below.
+                          Import .DAT files into the library to be viewed and edited using image processing algorithms faithful to the original conversion software.
+                        </span>
+                        <span><strong>Or...</strong></span>
+                        <span>
+                          Generate RAW .DNG images from .DAT files to be edited in third-party software using modern image processing for improved dynamic range, exposure latitude, and cleaner details.
                         </span>
                         <div className="empty-state-actions">
-                          <button onClick={() => openImport("files")}>Open Files…</button>
-                          <button onClick={() => openImport("folder")}>Open Folder…</button>
+                          <button onClick={() => openImport()}>Import .DAT Files into Library</button>
+                          {dngSupported ? <button onClick={openConvertDatToDng}>Generate RAW Files from .DATs</button> : null}
                         </div>
-                        {!desktopBridge ? <p className="field-help compact-help">Your photos stay on this device. Nothing is uploaded.</p> : null}
+                        {!desktopBridge ? <p className="field-help compact-help empty-state-privacy-note">Your photos stay on this device. Nothing is uploaded.</p> : null}
+                        {shouldShowExampleButton ? (
+                          <>
+                            <p className="field-help compact-help empty-state-example-note">No .DAT files of your own? Experiment with provided examples.</p>
+                            <button onClick={() => void loadExamplePhotos()} disabled={exampleImportProgress.active}>
+                              View and Edit Example .DAT Files
+                            </button>
+                          </>
+                        ) : null}
                       </>
                     ) : (
                       <>
@@ -1941,8 +3104,12 @@ export default function App() {
                             onClick={(event) => handleSelectPhoto(photo.id, event)}
                             onContextMenu={(event) => handleOpenPhotoContextMenu(photo.id, event)}
                             onDoubleClick={() => {
+                              lastLibraryTapRef.current = null;
                               setView("develop");
-                              setActivePhotoId(photo.id);
+                              updateActivePhotoId(photo.id);
+                              if (photo.previewStatus === "idle") {
+                                queuePreviewRender(photo);
+                              }
                               setSelectedIds(new Set([photo.id]));
                             }}
                           >
@@ -1978,16 +3145,26 @@ export default function App() {
                     <div className="placeholder-copy sunken-panel">
                       {photos.length === 0 ? (
                         <>
-                          <strong>Start with your camera photos</strong>
                           <span>
-                            Open a folder, memory card, or a few DAT files. You can browse everything in the library,
-                            then open one photo at a time with the rest waiting in the film strip below.
+                            Import .DAT files into the library to be viewed and edited using image processing algorithms faithful to the original conversion software.
+                          </span>
+                          <span><strong>Or...</strong></span>
+                          <span>
+                            Generate RAW .DNG images from .DAT files to be edited in third-party software using modern image processing for improved dynamic range, exposure latitude, and cleaner details.
                           </span>
                           <div className="empty-state-actions">
-                            <button onClick={() => openImport("files")}>Open Files…</button>
-                            <button onClick={() => openImport("folder")}>Open Folder…</button>
+                            <button onClick={() => openImport()}>Import .DAT Files into Library</button>
+                            {dngSupported ? <button onClick={openConvertDatToDng}>Generate RAW Files from .DATs</button> : null}
                           </div>
-                          {!desktopBridge ? <p className="field-help compact-help">Your photos stay on this device. Nothing is uploaded.</p> : null}
+                          {!desktopBridge ? <p className="field-help compact-help empty-state-privacy-note">Your photos stay on this device. Nothing is uploaded.</p> : null}
+                          {shouldShowExampleButton ? (
+                            <>
+                              <p className="field-help compact-help empty-state-example-note">No .DAT files of your own? Experiment with provided examples.</p>
+                              <button onClick={() => void loadExamplePhotos()} disabled={exampleImportProgress.active}>
+                                View and Edit Example .DAT Files
+                              </button>
+                            </>
+                          ) : null}
                         </>
                       ) : (
                         <>
@@ -1999,12 +3176,11 @@ export default function App() {
                   ) : (
                     <div className="develop-layout">
                       <div className="preview-panel">
-                        <div className="sunken-panel preview-stage">
+                        <div className={`sunken-panel preview-stage ${previewZoomMode === "fit" ? "is-fit-mode" : ""}`.trim()}>
                           {activePhoto ? (
                             <PhotoCanvas
                               frame={activePhoto.preview}
                               edits={activePhoto.edits}
-                              zoomMode={previewZoomMode}
                               zoomPercent={currentPreviewZoomPercent}
                               onFitZoomChange={setFitZoomPercent}
                             />
@@ -2027,7 +3203,7 @@ export default function App() {
                           <strong>Develop Controls</strong>
                           {activePhoto ? (
                             <>
-                              <div className="field-row-stacked">
+                              <div className="field-row-stacked develop-group-working-size">
                                 <label htmlFor="working-size">Working size</label>
                                 <select
                                   id="working-size"
@@ -2044,7 +3220,7 @@ export default function App() {
                                 </select>
                               </div>
 
-                              <fieldset className="group-box field-column">
+                              <fieldset className="group-box field-column develop-group-view">
                                 <legend>View</legend>
                                 <div className="button-row preview-zoom-controls">
                                   <button
@@ -2085,7 +3261,7 @@ export default function App() {
                                 </div>
                               </fieldset>
 
-                              <fieldset className="group-box field-column">
+                              <fieldset className="group-box field-column develop-group-orientation">
                                 <legend>Orientation</legend>
                                 <div className="field-column">
                                   <div className="icon-action-row">
@@ -2121,7 +3297,33 @@ export default function App() {
                                 </div>
                               </fieldset>
 
-                              <fieldset className="group-box field-column">
+                              <fieldset className="group-box inspector-section field-column develop-group-review">
+                                <legend>Review</legend>
+                                <div className="field-row-stacked">
+                                  <span className="inspector-section-label">Rating</span>
+                                  <RatingStars rating={activePhoto.metadata.rating} onSetRating={(rating) => setPhotoRating(activePhoto.id, rating)} />
+                                </div>
+
+                                <div className="field-row-stacked">
+                                  <span className="inspector-section-label">Pick / Reject</span>
+                                  <div className="review-action-row">
+                                    <ReviewActionButton
+                                      label="Pick"
+                                      kind="pick"
+                                      active={activePhoto.metadata.reviewStatus === "flagged"}
+                                      onClick={() => togglePhotoReviewStatus(activePhoto.id, "flagged")}
+                                    />
+                                    <ReviewActionButton
+                                      label="Reject"
+                                      kind="reject"
+                                      active={activePhoto.metadata.reviewStatus === "rejected"}
+                                      onClick={() => togglePhotoReviewStatus(activePhoto.id, "rejected")}
+                                    />
+                                  </div>
+                                </div>
+                              </fieldset>
+
+                              <fieldset className="group-box field-column develop-group-tone">
                                 <legend>Tone</legend>
                                 {toneSliderLabels.map((slider) => (
                                   <SliderRow
@@ -2136,7 +3338,7 @@ export default function App() {
                                 ))}
                               </fieldset>
 
-                              <fieldset className="group-box field-column">
+                              <fieldset className="group-box field-column develop-group-color">
                                 <legend>Color Balance</legend>
                                 {colorBalanceLabels.map((slider) => (
                                   <SliderRow
@@ -2150,7 +3352,7 @@ export default function App() {
                                 ))}
                               </fieldset>
 
-                              <div className="field-column current-photo-actions">
+                              <div className="field-column current-photo-actions develop-group-actions">
                                 <div className="button-row">
                                   <button onClick={() => copyPhotoEdits(activePhoto.id)}>Copy Edits</button>
                                   <button disabled={!copiedEdits} onClick={() => pastePhotoEdits(activePhoto.id)}>
@@ -2170,7 +3372,7 @@ export default function App() {
                 </div>
               </section>
 
-              {visiblePhotos.length > 0 ? (
+              {visiblePhotos.length > 0 && (!isMobileLayout || visiblePhotos.length > 1) ? (
                 <section className="window filmstrip-window">
                   <div className="title-bar">
                     <div className="title-bar-text">Film Strip</div>
@@ -2189,7 +3391,10 @@ export default function App() {
                                 photo.metadata.removed ? "is-removed" : ""
                               }`}
                               onClick={() => {
-                                setActivePhotoId(photo.id);
+                                updateActivePhotoId(photo.id);
+                                if (photo.previewStatus === "idle") {
+                                  queuePreviewRender(photo);
+                                }
                                 setSelectedIds(new Set([photo.id]));
                               }}
                               onContextMenu={(event) => handleOpenPhotoContextMenu(photo.id, event)}
