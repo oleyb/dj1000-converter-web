@@ -818,7 +818,7 @@ function ExportDialog({
             >
               <option value="png">PNG (lossless)</option>
               <option value="jpeg">JPEG (compressed)</option>
-              {dngSupported ? <option value="dng">DNG RAW File (modern export)</option> : null}
+              {dngSupported ? <option value="dng">DNG (raw, unedited, uncompressed, modern)</option> : null}
             </select>
           </div>
 
@@ -842,7 +842,7 @@ function ExportDialog({
           ) : null}
           {state.format === "dng" ? (
             <p className="field-help">
-              DNG RAW exports use the modern raw conversion path and do not apply the legacy Develop adjustments shown in this editor.
+              DNG Raw exports are unedited, uncompressed, use the modern raw conversion path, and do not apply the legacy Develop adjustments shown in this editor.
             </p>
           ) : null}
 
@@ -1097,6 +1097,7 @@ export default function App() {
     format: "png",
     includeSourceBundle: false,
   });
+  const [preferredExportFormat, setPreferredExportFormat] = useState<ExportDialogState["format"]>("png");
   const [exportProgress, setExportProgress] = useState({
     active: false,
     message: "",
@@ -1422,10 +1423,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!dngSupported && exportDialog.format === "dng") {
-      setExportDialog((current) => ({ ...current, format: "png" }));
+    if (!dngSupported) {
+      if (exportDialog.format === "dng") {
+        setExportDialog((current) => ({ ...current, format: "png" }));
+      }
+      if (preferredExportFormat === "dng") {
+        setPreferredExportFormat("png");
+      }
     }
-  }, [dngSupported, exportDialog.format]);
+  }, [dngSupported, exportDialog.format, preferredExportFormat]);
 
   const replacePhoto = useCallback((photoId: string, updater: (photo: PhotoRecord) => PhotoRecord) => {
     setPhotos((current) => {
@@ -2320,8 +2326,13 @@ export default function App() {
       ...current,
       isOpen: true,
       scope,
-      format: format ?? current.format,
+      format: format ?? preferredExportFormat,
     }));
+  }
+
+  function handleExportDialogChange(next: ExportDialogState) {
+    setExportDialog(next);
+    setPreferredExportFormat(next.format);
   }
 
   async function runExport() {
@@ -2613,7 +2624,7 @@ export default function App() {
         selectedDisabled={selectedPhotos.length === 0}
         allDisabled={photos.length === 0}
         onClose={() => setExportDialog((current) => ({ ...current, isOpen: false }))}
-        onChange={setExportDialog}
+        onChange={handleExportDialogChange}
         onRun={() => void runExport()}
       />
 
@@ -2834,7 +2845,7 @@ export default function App() {
                       disabled={!activePhoto}
                       onClick={() => {
                         setOpenMenu(null);
-                        setExportDialog((current) => ({ ...current, isOpen: true, scope: "current" }));
+                        openExportDialogForScope("current");
                       }}
                     >
                       Export Current
@@ -2844,7 +2855,7 @@ export default function App() {
                       disabled={selectedPhotos.length === 0}
                       onClick={() => {
                         setOpenMenu(null);
-                        setExportDialog((current) => ({ ...current, isOpen: true, scope: "selected" }));
+                        openExportDialogForScope("selected");
                       }}
                     >
                       Export Selected
@@ -2854,7 +2865,7 @@ export default function App() {
                       disabled={photos.length === 0}
                       onClick={() => {
                         setOpenMenu(null);
-                        setExportDialog((current) => ({ ...current, isOpen: true, scope: "all" }));
+                        openExportDialogForScope("all");
                       }}
                     >
                       Export All
@@ -3089,7 +3100,7 @@ export default function App() {
                       <button onClick={() => setView("develop")} disabled={!activePhoto}>
                         Open In Develop
                       </button>
-                      <button onClick={() => setExportDialog((current) => ({ ...current, isOpen: true, scope: "selected" }))}>
+                      <button onClick={() => openExportDialogForScope("selected")}>
                         Export Selected
                       </button>
                     </div>
