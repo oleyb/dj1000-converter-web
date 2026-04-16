@@ -81,7 +81,7 @@ jobs:
           const { createDj1000WasmConverter } = await import(pathToFileURL(helperPath).href);
           const converter = await createDj1000WasmConverter({
             locateFile(file) {
-              return new URL(file, pathToFileURL(modulePath));
+              return new URL(file, pathToFileURL(modulePath)).href;
             },
           });
           if (!converter.supportsDng) {
