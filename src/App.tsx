@@ -463,6 +463,7 @@ function AppMenu({
   onCloseMenu,
   onLoadDatFiles,
   onConvertDatFilesToDng,
+  onClearCurrentLibrary,
   onExportCurrent,
   onExportSelected,
   onExportAll,
@@ -496,6 +497,7 @@ function AppMenu({
   onCloseMenu: () => void;
   onLoadDatFiles: () => void;
   onConvertDatFilesToDng: () => void;
+  onClearCurrentLibrary: () => void;
   onExportCurrent: () => void;
   onExportSelected: () => void;
   onExportAll: () => void;
@@ -546,6 +548,10 @@ function AppMenu({
                   </button>
                 </>
               ) : null}
+              <div className="context-menu-separator" />
+              <button className="context-menu-item" disabled={!photosLoaded} onClick={runMenuAction(onClearCurrentLibrary)}>
+                Clear Current Library
+              </button>
               <div className="context-menu-separator" />
               <button className="context-menu-item" disabled={!photosLoaded || !isDevelopMode} onClick={runMenuAction(onExportCurrent)}>
                 Export Current
@@ -1008,6 +1014,47 @@ function ExportIssuesDialog({
   );
 }
 
+function ClearLibraryDialog({
+  isOpen,
+  photoCount,
+  onCancel,
+  onConfirm,
+}: {
+  isOpen: boolean;
+  photoCount: number;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  if (!isOpen) {
+    return null;
+  }
+
+  return (
+    <div className="dialog-backdrop">
+      <div className="window dialog-window" role="dialog" aria-modal="true" aria-labelledby="clear-library-title">
+        <div className="title-bar">
+          <div id="clear-library-title" className="title-bar-text">Clear Current Library</div>
+          <div className="title-bar-controls">
+            <button aria-label="Close" onClick={onCancel} />
+          </div>
+        </div>
+        <div className="window-body field-column">
+          <p>Clear the current library and start fresh?</p>
+          <p className="field-help">
+            All currently loaded photos will be cleared out of this library session.
+            Your original .DAT files will not be deleted.
+          </p>
+          <p className="field-help">This will clear {formatCount("loaded photo", photoCount)}.</p>
+          <div className="dialog-actions">
+            <button onClick={onCancel}>Cancel</button>
+            <button onClick={onConfirm}>Clear Current Library</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PhotoContextMenu({
   photo,
   x,
@@ -1155,6 +1202,7 @@ export default function App() {
     libraryImportMode: "add",
   });
   const [convertDatDialogOpen, setConvertDatDialogOpen] = useState(false);
+  const [clearLibraryDialogOpen, setClearLibraryDialogOpen] = useState(false);
   const [exportIncludeSourceBundlePreference, setExportIncludeSourceBundlePreference] = useState(() =>
     loadStoredBooleanPreference(exportIncludeSourceBundleStorageKey),
   );
@@ -1742,6 +1790,7 @@ export default function App() {
         event.shiftKey ||
         openMenu !== null ||
         contextMenu !== null ||
+        clearLibraryDialogOpen ||
         importDialog.isOpen ||
         convertDatDialogOpen ||
         exportDialog.isOpen ||
@@ -1788,6 +1837,7 @@ export default function App() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [
+    clearLibraryDialogOpen,
     contextMenu,
     convertDatDialogOpen,
     exampleImportProgress.active,
@@ -1843,6 +1893,59 @@ export default function App() {
     if (typeof window !== "undefined") {
       window.localStorage.setItem(hasLoadedOwnPhotosStorageKey, "true");
     }
+  }
+
+  function requestClearCurrentLibrary() {
+    if (photosRef.current.length === 0) {
+      return;
+    }
+
+    setContextMenu(null);
+    setOpenMenu(null);
+    setClearLibraryDialogOpen(true);
+  }
+
+  function confirmClearCurrentLibrary() {
+    const currentPhotos = photosRef.current;
+    setClearLibraryDialogOpen(false);
+    if (currentPhotos.length === 0) {
+      return;
+    }
+
+    for (const timer of saveTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    saveTimersRef.current.clear();
+    for (const timer of thumbnailTimersRef.current.values()) {
+      window.clearTimeout(timer);
+    }
+    thumbnailTimersRef.current.clear();
+    for (const photo of currentPhotos) {
+      renderPoolRef.current?.closeDocument(photo.id);
+    }
+
+    photosRef.current = [];
+    desiredPreviewRef.current = null;
+    activePreviewSignatureRef.current = null;
+    lastLibraryTapRef.current = null;
+    setPhotos([]);
+    updateActivePhotoId(null);
+    setSelectedIds(new Set());
+    setView("library");
+    setShowRemoved(false);
+    setMinimumRating(0);
+    setReviewFilter("all");
+    setContextMenu(null);
+    setCopiedEdits(null);
+    setOpenMenu(null);
+    setClearLibraryDialogOpen(false);
+    setImportDialog((current) => ({ ...current, isOpen: false, libraryImportMode: "add" }));
+    setConvertDatDialogOpen(false);
+    setExportDialog((current) => ({ ...current, isOpen: false, scope: "current" }));
+    setExportProgress({ active: false, message: "", completed: 0, total: 0, percent: 0 });
+    setExampleImportProgress({ active: false, message: "", completed: 0, total: 0, percent: 0 });
+    setExportIssuesDialog({ isOpen: false, title: "", summary: "", failedFiles: [] });
+    setStatus("Library cleared. Import .DAT files to start a fresh library.");
   }
 
   async function ingestPayloads(
@@ -2774,6 +2877,13 @@ export default function App() {
         onClose={() => setExportIssuesDialog((current) => ({ ...current, isOpen: false }))}
       />
 
+      <ClearLibraryDialog
+        isOpen={clearLibraryDialogOpen && photos.length > 0}
+        photoCount={photos.length}
+        onCancel={() => setClearLibraryDialogOpen(false)}
+        onConfirm={confirmClearCurrentLibrary}
+      />
+
       {contextMenu && contextMenuPhoto ? (
         <PhotoContextMenu
           photo={contextMenuPhoto}
@@ -2860,6 +2970,7 @@ export default function App() {
             onCloseMenu={() => setOpenMenu(null)}
             onLoadDatFiles={() => openImport()}
             onConvertDatFilesToDng={openConvertDatToDng}
+            onClearCurrentLibrary={requestClearCurrentLibrary}
             onExportCurrent={() => openExportDialogForScope("current")}
             onExportSelected={() => openExportDialogForScope("selected")}
             onExportAll={() => openExportDialogForScope("all")}
@@ -3220,6 +3331,9 @@ export default function App() {
                       </button>
                       <button onClick={() => openExportDialogForScope("selected")}>
                         Export Selected
+                      </button>
+                      <button onClick={requestClearCurrentLibrary}>
+                        Clear Current Library
                       </button>
                     </div>
                     <div className="library-scroll sunken-panel" style={{ padding: 10 }}>
