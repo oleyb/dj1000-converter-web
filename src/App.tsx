@@ -14,9 +14,11 @@ import {
   buildBrowserExportArchiveWithProgress,
   buildBrowserExportBundle,
   buildBrowserDngExportBundle,
+  buildBrowserSourceBundle,
   buildIdentifiedExportStem,
   buildDesktopExportPayload,
   buildDesktopDngExportPayload,
+  buildDesktopSourceBundle,
   triggerBrowserDownload,
 } from "./lib/exporters";
 import { createTransformedFrameCanvas, drawFrameToCanvas, getTransformedFrameSize } from "./lib/frameTransforms";
@@ -34,6 +36,7 @@ import type {
   PhotoMetadata,
   PhotoRecord,
   PhotoReviewStatus,
+  RenderExportFormat,
   RenderedFrame,
 } from "./types/models";
 
@@ -54,7 +57,8 @@ const zoomPercentOptions = [25, 50, 75, 100, 125, 150, 200, 250, 300, 350, 400] 
 const fitViewportSafetyMarginPx = 2;
 const exampleDatFiles = ["MDSC0001.DAT", "MDSC0003.DAT", "MDSC0005.DAT", "MDSC0010.DAT"] as const;
 const hasLoadedOwnPhotosStorageKey = "dj1000.hasLoadedOwnPhotos";
-const includeSourceBundleStorageKey = "dj1000.includeSourceBundle";
+const exportIncludeSourceBundleStorageKey = "dj1000.includeSourceBundle";
+const rawConverterIncludeSourceBundleStorageKey = "dj1000.rawConverterIncludeSourceBundle";
 const examplePhotoPathPrefix = "Example .DAT Files/";
 
 type ReviewFilter = "all" | "picked" | "rejected" | "not-rejected";
@@ -93,16 +97,35 @@ function summarizeFailedFiles(names: string[], limit = 5) {
   return `${names.slice(0, limit).join(", ")}, and ${names.length - limit} more`;
 }
 
-function loadIncludeSourceBundlePreference() {
+function loadStoredBooleanPreference(storageKey: string, defaultValue = true) {
   if (typeof window === "undefined") {
-    return true;
+    return defaultValue;
   }
 
   try {
-    const stored = window.localStorage.getItem(includeSourceBundleStorageKey);
-    return stored === null ? true : stored === "true";
+    const stored = window.localStorage.getItem(storageKey);
+    return stored === null ? defaultValue : stored === "true";
   } catch {
-    return true;
+    return defaultValue;
+  }
+}
+
+function formatNeedsDngSupport(format: ExportDialogState["format"]) {
+  return format === "dng" || format === "dng-png" || format === "dng-jpeg";
+}
+
+function getRenderedExportFormat(format: ExportDialogState["format"]): RenderExportFormat | null {
+  switch (format) {
+    case "png":
+    case "jpeg":
+      return format;
+    case "dng-png":
+      return "png";
+    case "dng-jpeg":
+      return "jpeg";
+    case "dng":
+    default:
+      return null;
   }
 }
 
@@ -851,6 +874,8 @@ function ExportDialog({
               <option value="png">PNG (lossless)</option>
               <option value="jpeg">JPEG (compressed)</option>
               {dngSupported ? <option value="dng">DNG (raw, unedited, uncompressed, modern)</option> : null}
+              {dngSupported ? <option value="dng-png">DNG and PNG</option> : null}
+              {dngSupported ? <option value="dng-jpeg">DNG and JPEG</option> : null}
             </select>
           </div>
 
@@ -862,8 +887,8 @@ function ExportDialog({
               onChange={(event) => onChange({ ...state, includeSourceBundle: event.target.checked })}
             />
             <label htmlFor="include-source-bundle">
-              Turn this on if you want to reopen the exported folder later and keep working with the saved adjustments.
-              (Includes original *.DAT files as well as *.DAT.json edit settings files)
+              Include original *.DAT and *.DAT.json edit settings files in export.
+              (Allows you to re-open the folder here and preserve the previous edit settings)
             </label>
           </div>
 
@@ -872,9 +897,12 @@ function ExportDialog({
               Website exports download as a single file when possible, or as a ZIP file when multiple files need to stay together.
             </p>
           ) : null}
-          {state.format === "dng" ? (
+          {formatNeedsDngSupport(state.format) ? (
             <p className="field-help">
-              DNG Raw exports are unedited, uncompressed, use the modern raw conversion path, and do not apply the legacy Develop adjustments shown in this editor.
+              The .dng file is raw, unedited, uncompressed, uses the modern raw conversion path, and does not apply the legacy Develop adjustments shown in this editor.
+              {state.format === "dng-png" || state.format === "dng-jpeg"
+                ? " The companion .png or .jpg uses your current editor adjustments."
+                : ""}
             </p>
           ) : null}
 
@@ -1123,12 +1151,17 @@ export default function App() {
     libraryImportMode: "add",
   });
   const [convertDatDialogOpen, setConvertDatDialogOpen] = useState(false);
-  const [includeSourceBundlePreference, setIncludeSourceBundlePreference] = useState(loadIncludeSourceBundlePreference);
+  const [exportIncludeSourceBundlePreference, setExportIncludeSourceBundlePreference] = useState(() =>
+    loadStoredBooleanPreference(exportIncludeSourceBundleStorageKey),
+  );
+  const [rawConverterIncludeSourceBundlePreference, setRawConverterIncludeSourceBundlePreference] = useState(() =>
+    loadStoredBooleanPreference(rawConverterIncludeSourceBundleStorageKey),
+  );
   const [exportDialog, setExportDialog] = useState<ExportDialogState>({
     isOpen: false,
     scope: "current",
     format: "png",
-    includeSourceBundle: loadIncludeSourceBundlePreference(),
+    includeSourceBundle: loadStoredBooleanPreference(exportIncludeSourceBundleStorageKey),
   });
   const [preferredExportFormat, setPreferredExportFormat] = useState<ExportDialogState["format"]>("png");
   const [exportProgress, setExportProgress] = useState({
@@ -1152,10 +1185,19 @@ export default function App() {
     percent: 0,
   });
 
-  const updateIncludeSourceBundlePreference = useCallback((checked: boolean) => {
-    setIncludeSourceBundlePreference(checked);
+  const updateExportIncludeSourceBundlePreference = useCallback((checked: boolean) => {
+    setExportIncludeSourceBundlePreference(checked);
     try {
-      window.localStorage.setItem(includeSourceBundleStorageKey, checked ? "true" : "false");
+      window.localStorage.setItem(exportIncludeSourceBundleStorageKey, checked ? "true" : "false");
+    } catch {
+      // Ignore storage failures and keep the in-memory preference.
+    }
+  }, []);
+
+  const updateRawConverterIncludeSourceBundlePreference = useCallback((checked: boolean) => {
+    setRawConverterIncludeSourceBundlePreference(checked);
+    try {
+      window.localStorage.setItem(rawConverterIncludeSourceBundleStorageKey, checked ? "true" : "false");
     } catch {
       // Ignore storage failures and keep the in-memory preference.
     }
@@ -1466,10 +1508,10 @@ export default function App() {
 
   useEffect(() => {
     if (!dngSupported) {
-      if (exportDialog.format === "dng") {
+      if (formatNeedsDngSupport(exportDialog.format)) {
         setExportDialog((current) => ({ ...current, format: "png" }));
       }
-      if (preferredExportFormat === "dng") {
+      if (formatNeedsDngSupport(preferredExportFormat)) {
         setPreferredExportFormat("png");
       }
     }
@@ -2053,7 +2095,7 @@ export default function App() {
             name: `${buildIdentifiedExportStem(payload.relativePath, payload.bytes)}.dng`,
             blob: new Blob([Uint8Array.from(dngBytes)], { type: "image/x-adobe-dng" }),
           });
-          if (includeSourceBundlePreference) {
+          if (rawConverterIncludeSourceBundlePreference) {
             archiveFiles.push({
               name: payload.relativePath,
               blob: new Blob([Uint8Array.from(payload.bytes)], { type: "application/octet-stream" }),
@@ -2381,13 +2423,13 @@ export default function App() {
       isOpen: true,
       scope,
       format: format ?? preferredExportFormat,
-      includeSourceBundle: includeSourceBundlePreference,
+      includeSourceBundle: exportIncludeSourceBundlePreference,
     }));
   }
 
   function handleExportDialogChange(next: ExportDialogState) {
-    if (next.includeSourceBundle !== includeSourceBundlePreference) {
-      updateIncludeSourceBundlePreference(next.includeSourceBundle);
+    if (next.includeSourceBundle !== exportIncludeSourceBundlePreference) {
+      updateExportIncludeSourceBundlePreference(next.includeSourceBundle);
     }
     setExportDialog(next);
     setPreferredExportFormat(next.format);
@@ -2416,6 +2458,8 @@ export default function App() {
     try {
       const failedFiles: string[] = [];
       let succeededCount = 0;
+      const wantsDng = formatNeedsDngSupport(exportDialog.format);
+      const renderedFormat = getRenderedExportFormat(exportDialog.format);
       for (const [index, photo] of targets.entries()) {
         setExportProgress({
           active: true,
@@ -2426,48 +2470,37 @@ export default function App() {
         });
 
         try {
-          if (exportDialog.format === "dng") {
-            if (!dngSupported) {
-              throw new Error("DNG export is unavailable in this build.");
-            }
+          if (wantsDng && !dngSupported) {
+            throw new Error("DNG export is unavailable in this build.");
+          }
+
+          if (wantsDng) {
             const dngBytes = await renderPoolRef.current!.convertDatToDng(photo.datBytes, photo.id);
             if (desktopBridge) {
-              const files = buildDesktopDngExportPayload(
-                photo,
-                dngBytes,
-                exportDialog.includeSourceBundle,
-              );
-              desktopFiles.push(...files);
+              desktopFiles.push(...buildDesktopDngExportPayload(photo, dngBytes, false));
             } else {
-              const files = buildBrowserDngExportBundle(
-                photo,
-                dngBytes,
-                exportDialog.includeSourceBundle,
-              );
-              browserFiles.push(...files);
+              browserFiles.push(...buildBrowserDngExportBundle(photo, dngBytes, false));
             }
-            succeededCount += 1;
-          } else {
+          }
+
+          if (renderedFormat) {
             const frame = await renderPoolRef.current!.render(photo.id, photo.edits, "export");
             if (desktopBridge) {
-              const files = await buildDesktopExportPayload(
-                photo,
-                frame,
-                exportDialog.format,
-                exportDialog.includeSourceBundle,
-              );
-              desktopFiles.push(...files);
+              desktopFiles.push(...await buildDesktopExportPayload(photo, frame, renderedFormat, false));
             } else {
-              const files = await buildBrowserExportBundle(
-                photo,
-                frame,
-                exportDialog.format,
-                exportDialog.includeSourceBundle,
-              );
-              browserFiles.push(...files);
+              browserFiles.push(...await buildBrowserExportBundle(photo, frame, renderedFormat, false));
             }
-            succeededCount += 1;
           }
+
+          if (exportDialog.includeSourceBundle) {
+            if (desktopBridge) {
+              desktopFiles.push(...buildDesktopSourceBundle(photo));
+            } else {
+              browserFiles.push(...buildBrowserSourceBundle(photo));
+            }
+          }
+
+          succeededCount += 1;
         } catch (error) {
           console.error(`Export failed for ${photo.name}:`, error);
           failedFiles.push(photo.name);
@@ -2669,9 +2702,9 @@ export default function App() {
 
       <ConvertDatToDngDialog
         isOpen={convertDatDialogOpen}
-        includeSourceBundle={includeSourceBundlePreference}
+        includeSourceBundle={rawConverterIncludeSourceBundlePreference}
         onClose={() => setConvertDatDialogOpen(false)}
-        onChangeIncludeSourceBundle={updateIncludeSourceBundlePreference}
+        onChangeIncludeSourceBundle={updateRawConverterIncludeSourceBundlePreference}
         onChooseFiles={() => handleConvertDatToDngRun("files")}
         onChooseFolder={() => handleConvertDatToDngRun("folder")}
       />

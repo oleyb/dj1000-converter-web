@@ -4,9 +4,9 @@ import { createTransformedFrameCanvas } from "./frameTransforms";
 import { stringifySidecar } from "./sidecar";
 import type {
   ExportFilePayload,
-  ExportFormat,
   PhotoEdits,
   PhotoRecord,
+  RenderExportFormat,
   RenderedFrame,
 } from "../types/models";
 
@@ -41,10 +41,7 @@ export function buildIdentifiedExportStem(relativePath: string, datBytes: Uint8A
   return `${stem}-${buildExportIdentifier(datBytes)}`;
 }
 
-export async function renderFrameToBlob(frame: RenderedFrame, edits: PhotoEdits, format: ExportFormat) {
-  if (format === "dng") {
-    throw new Error("DNG export does not use the rendered frame encoder.");
-  }
+export async function renderFrameToBlob(frame: RenderedFrame, edits: PhotoEdits, format: RenderExportFormat) {
   const canvas = createTransformedFrameCanvas(frame, edits);
   const mimeType = format === "jpeg" ? "image/jpeg" : "image/png";
   const quality = format === "jpeg" ? 0.95 : undefined;
@@ -63,7 +60,7 @@ export async function renderFrameToBlob(frame: RenderedFrame, edits: PhotoEdits,
 export async function renderFrameToDownloadFile(
   frame: RenderedFrame,
   edits: PhotoEdits,
-  format: ExportFormat,
+  format: RenderExportFormat,
   baseName: string,
 ) {
   const extension = format === "jpeg" ? "jpg" : "png";
@@ -72,6 +69,33 @@ export async function renderFrameToDownloadFile(
     filename: `${baseName}.${extension}`,
     blob,
   };
+}
+
+export function buildBrowserSourceBundle(photo: PhotoRecord) {
+  const basePath = normalizeArchivePath(photo.relativePath || photo.name);
+  return [
+    {
+      name: `${basePath}.json`,
+      blob: new Blob([stringifySidecar(photo.edits, photo.metadata, photo.sidecar)], { type: "application/json" }),
+    },
+    {
+      name: basePath,
+      blob: new Blob([sliceTypedArrayBuffer(photo.datBytes)], { type: "application/octet-stream" }),
+    },
+  ] satisfies BrowserExportFile[];
+}
+
+export function buildDesktopSourceBundle(photo: PhotoRecord) {
+  return [
+    {
+      relativePath: `${photo.name}.json`,
+      bytes: new TextEncoder().encode(stringifySidecar(photo.edits, photo.metadata, photo.sidecar)).buffer,
+    },
+    {
+      relativePath: photo.name,
+      bytes: sliceTypedArrayBuffer(photo.datBytes),
+    },
+  ] satisfies ExportFilePayload[];
 }
 
 export function buildBrowserDngExportBundle(
@@ -89,14 +113,7 @@ export function buildBrowserDngExportBundle(
   ];
 
   if (includeSourceBundle) {
-    files.push({
-      name: `${basePath}.json`,
-      blob: new Blob([stringifySidecar(photo.edits, photo.metadata, photo.sidecar)], { type: "application/json" }),
-    });
-    files.push({
-      name: basePath,
-      blob: new Blob([sliceTypedArrayBuffer(photo.datBytes)], { type: "application/octet-stream" }),
-    });
+    files.push(...buildBrowserSourceBundle(photo));
   }
 
   return files;
@@ -116,14 +133,7 @@ export function buildDesktopDngExportPayload(
   ];
 
   if (includeSourceBundle) {
-    files.push({
-      relativePath: `${photo.name}.json`,
-      bytes: new TextEncoder().encode(stringifySidecar(photo.edits, photo.metadata, photo.sidecar)).buffer,
-    });
-    files.push({
-      relativePath: photo.name,
-      bytes: sliceTypedArrayBuffer(photo.datBytes),
-    });
+    files.push(...buildDesktopSourceBundle(photo));
   }
 
   return files;
@@ -175,23 +185,15 @@ export async function buildBrowserExportArchiveWithProgress(
 export async function buildBrowserExportBundle(
   photo: PhotoRecord,
   frame: RenderedFrame,
-  format: ExportFormat,
+  format: RenderExportFormat,
   includeSourceBundle: boolean,
 ) {
-  const basePath = normalizeArchivePath(photo.relativePath || photo.name);
-  const stem = buildIdentifiedExportStem(basePath, photo.datBytes);
+  const stem = buildIdentifiedExportStem(photo.relativePath || photo.name, photo.datBytes);
   const rendered = await renderFrameToDownloadFile(frame, photo.edits, format, stem);
   const files: BrowserExportFile[] = [{ name: rendered.filename, blob: rendered.blob }];
 
   if (includeSourceBundle) {
-    files.push({
-      name: `${basePath}.json`,
-      blob: new Blob([stringifySidecar(photo.edits, photo.metadata, photo.sidecar)], { type: "application/json" }),
-    });
-    files.push({
-      name: basePath,
-      blob: new Blob([sliceTypedArrayBuffer(photo.datBytes)], { type: "application/octet-stream" }),
-    });
+    files.push(...buildBrowserSourceBundle(photo));
   }
 
   return files;
@@ -200,7 +202,7 @@ export async function buildBrowserExportBundle(
 export async function buildDesktopExportPayload(
   photo: PhotoRecord,
   frame: RenderedFrame,
-  format: ExportFormat,
+  format: RenderExportFormat,
   includeSourceBundle: boolean,
 ) {
   const stem = buildIdentifiedExportStem(photo.relativePath, photo.datBytes);
@@ -214,14 +216,7 @@ export async function buildDesktopExportPayload(
   ];
 
   if (includeSourceBundle) {
-    files.push({
-      relativePath: `${photo.name}.json`,
-      bytes: new TextEncoder().encode(stringifySidecar(photo.edits, photo.metadata, photo.sidecar)).buffer,
-    });
-    files.push({
-      relativePath: photo.name,
-      bytes: sliceTypedArrayBuffer(photo.datBytes),
-    });
+    files.push(...buildDesktopSourceBundle(photo));
   }
 
   return files;
