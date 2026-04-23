@@ -15,12 +15,30 @@ export interface BrowserExportFile {
   blob: Blob;
 }
 
+function updateFnv1a(hash: number, value: number) {
+  return Math.imul(hash ^ value, 0x01000193) >>> 0;
+}
+
 function sliceTypedArrayBuffer(bytes: Uint8Array) {
   return Uint8Array.from(bytes).buffer;
 }
 
 function normalizeArchivePath(input: string) {
   return input.replaceAll("\\", "/").replace(/^\/+/, "");
+}
+
+function buildExportIdentifier(datBytes: Uint8Array) {
+  let hash = 0x811c9dc5;
+  for (const value of datBytes) {
+    hash = updateFnv1a(hash, value);
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+export function buildIdentifiedExportStem(relativePath: string, datBytes: Uint8Array) {
+  const normalizedPath = normalizeArchivePath(relativePath);
+  const stem = normalizedPath.replace(/\.dat$/i, "");
+  return `${stem}-${buildExportIdentifier(datBytes)}`;
 }
 
 export async function renderFrameToBlob(frame: RenderedFrame, edits: PhotoEdits, format: ExportFormat) {
@@ -62,7 +80,7 @@ export function buildBrowserDngExportBundle(
   includeSourceBundle: boolean,
 ) {
   const basePath = normalizeArchivePath(photo.relativePath || photo.name);
-  const stem = basePath.replace(/\.dat$/i, "");
+  const stem = buildIdentifiedExportStem(basePath, photo.datBytes);
   const files: BrowserExportFile[] = [
     {
       name: `${stem}.dng`,
@@ -89,7 +107,7 @@ export function buildDesktopDngExportPayload(
   dngBytes: Uint8Array,
   includeSourceBundle: boolean,
 ) {
-  const stem = photo.relativePath.replace(/\.dat$/i, "");
+  const stem = buildIdentifiedExportStem(photo.relativePath, photo.datBytes);
   const files: ExportFilePayload[] = [
     {
       relativePath: `${stem}.dng`,
@@ -161,7 +179,7 @@ export async function buildBrowserExportBundle(
   includeSourceBundle: boolean,
 ) {
   const basePath = normalizeArchivePath(photo.relativePath || photo.name);
-  const stem = basePath.replace(/\.dat$/i, "");
+  const stem = buildIdentifiedExportStem(basePath, photo.datBytes);
   const rendered = await renderFrameToDownloadFile(frame, photo.edits, format, stem);
   const files: BrowserExportFile[] = [{ name: rendered.filename, blob: rendered.blob }];
 
@@ -185,7 +203,7 @@ export async function buildDesktopExportPayload(
   format: ExportFormat,
   includeSourceBundle: boolean,
 ) {
-  const stem = photo.relativePath.replace(/\.dat$/i, "");
+  const stem = buildIdentifiedExportStem(photo.relativePath, photo.datBytes);
   const rendered = await renderFrameToDownloadFile(frame, photo.edits, format, stem);
   const renderedBytes = await rendered.blob.arrayBuffer();
   const files: ExportFilePayload[] = [

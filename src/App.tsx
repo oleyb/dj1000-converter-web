@@ -14,6 +14,7 @@ import {
   buildBrowserExportArchiveWithProgress,
   buildBrowserExportBundle,
   buildBrowserDngExportBundle,
+  buildIdentifiedExportStem,
   buildDesktopExportPayload,
   buildDesktopDngExportPayload,
   triggerBrowserDownload,
@@ -2008,7 +2009,7 @@ export default function App() {
         try {
           const dngBytes = await pool.convertDatToDng(payload.bytes);
           archiveFiles.push({
-            name: payload.relativePath.replace(/\.dat$/i, ".dng"),
+            name: `${buildIdentifiedExportStem(payload.relativePath, payload.bytes)}.dng`,
             blob: new Blob([Uint8Array.from(dngBytes)], { type: "image/x-adobe-dng" }),
           });
           convertedCount += 1;
