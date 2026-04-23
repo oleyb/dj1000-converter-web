@@ -1,0 +1,18 @@
+{
+  "name": "Mitsubishi DJ-1000 / UMAX PhotoRun Editor",
+  "short_name": "DJ1000 Editor",
+  "description": "Convert, cull, edit, and export Mitsubishi DJ-1000 / UMAX PhotoRun .DAT photos locally in your browser.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#808080",
+  "theme_color": "#000080",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

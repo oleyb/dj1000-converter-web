@@ -110,6 +110,10 @@ function loadStoredBooleanPreference(storageKey: string, defaultValue = true) {
   }
 }
 
+function getBrowserOnlineState() {
+  return typeof navigator === "undefined" ? true : navigator.onLine;
+}
+
 function formatNeedsDngSupport(format: ExportDialogState["format"]) {
   return format === "dng" || format === "dng-png" || format === "dng-jpeg";
 }
@@ -1208,6 +1212,7 @@ export default function App() {
     }
     return window.localStorage.getItem(hasLoadedOwnPhotosStorageKey) === "true";
   });
+  const [isBrowserOnline, setIsBrowserOnline] = useState(getBrowserOnlineState);
   const [dngSupported, setDngSupported] = useState(false);
   const [previewZoomMode, setPreviewZoomMode] = useState<"fit" | "custom">("fit");
   const [previewZoomPercent, setPreviewZoomPercent] = useState(100);
@@ -1316,7 +1321,7 @@ export default function App() {
     () => photos.some((photo) => !photo.relativePath.startsWith(examplePhotoPathPrefix)),
     [photos],
   );
-  const shouldShowExampleButton = !hasLoadedOwnPhotos && !hasOwnPhotosInLibrary;
+  const shouldShowExampleButton = isBrowserOnline && !hasLoadedOwnPhotos && !hasOwnPhotosInLibrary;
   const contextMenuPhoto = useMemo(
     () => (contextMenu ? photos.find((photo) => photo.id === contextMenu.photoId) ?? null : null),
     [contextMenu, photos],
@@ -1336,6 +1341,21 @@ export default function App() {
   useEffect(() => {
     photosRef.current = photos;
   }, [photos]);
+
+  useEffect(() => {
+    function updateOnlineState() {
+      setIsBrowserOnline(getBrowserOnlineState());
+    }
+
+    window.addEventListener("online", updateOnlineState);
+    window.addEventListener("offline", updateOnlineState);
+    updateOnlineState();
+
+    return () => {
+      window.removeEventListener("online", updateOnlineState);
+      window.removeEventListener("offline", updateOnlineState);
+    };
+  }, []);
 
   useEffect(() => {
     activePhotoIdRef.current = activePhotoId;
@@ -1915,6 +1935,11 @@ export default function App() {
   }
 
   async function loadExamplePhotos() {
+    if (!getBrowserOnlineState()) {
+      setStatus("Example .DAT Files are only available while online.");
+      return;
+    }
+
     const totalSteps = exampleDatFiles.length * 2;
     const updateProgress = (message: string, completed: number) => {
       setExampleImportProgress({
