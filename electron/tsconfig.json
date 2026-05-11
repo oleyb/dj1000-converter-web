@@ -1,0 +1,17 @@
+{
+  "extends": "../tsconfig.node.json",
+  "compilerOptions": {
+    "outDir": "../electron-dist",
+    "rootDir": ".",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "allowImportingTsExtensions": false,
+    "sourceMap": true,
+    "declaration": false,
+    "noEmit": false
+  },
+  "include": ["./main.ts", "./preload.ts"]
+}
